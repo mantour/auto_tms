@@ -3,7 +3,7 @@ VENV := .venv
 BIN := $(VENV)/bin
 AUTO_TMS := $(BIN)/auto_tms
 
-.PHONY: setup config run status status-cached log stop help
+.PHONY: setup config run status status-cached log stop reset help
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  make %-14s %s\n", $$1, $$2}'
@@ -46,3 +46,7 @@ log: ## Tail today's log
 
 stop: ## Stop running pipeline
 	@pkill -f "auto_tms.*run" 2>/dev/null && echo "Stopped" || echo "Not running"
+
+reset: ## Clear plan and progress (start fresh)
+	@rm -f ~/.auto_tms/state/progress.json ~/.auto_tms/state/plan.json
+	@echo "Cleared plan and progress"
