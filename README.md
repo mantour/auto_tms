@@ -35,23 +35,15 @@ make config       # 設定帳號密碼、API key、主機位址
 ## 使用
 
 ```bash
-# 全自動執行（背景運行）
-make run
-
-# 完成單一課程
-make run ID=198761
-
-# 查看學程完成狀況 + 課程進度（即時）
-make status
-
-# 查看快取狀態（不連網）
-make status-cached
-
-# 查看即時 log
-make log
-
-# 停止執行中的流程
-make stop
+make run                         # 全自動執行（背景運行）
+make run ID=198761               # 完成單一課程
+make status                      # 即時狀態（scrape 網站 + 本地進度）
+make status CACHED=1             # 快取狀態（不連網）
+make status ALL=1                # 顯示全部學程與課程
+make status CACHED=1 ALL=1       # 快取 + 全部
+make log                         # 查看即時 log
+make stop                        # 停止執行中的流程
+make reset                       # 清除進度，重新開始
 ```
 
 也可以直接使用 CLI：
@@ -62,6 +54,7 @@ auto_tms run <courseId>         # 完成單一課程
 auto_tms run -f courses.txt    # 從檔案批次完成
 auto_tms status                 # 即時狀態
 auto_tms status --cached        # 快取狀態
+auto_tms status --all           # 顯示全部（含已通過/已完成）
 auto_tms log                    # 查看 log
 auto_tms -v <command>           # 顯示詳細 log
 ```
