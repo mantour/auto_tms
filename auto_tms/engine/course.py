@@ -8,7 +8,7 @@ from playwright.async_api import BrowserContext, Page
 
 from ..config import get_base_url
 from ..state.models import CourseProgress, CourseStatus, MaterialType, Status
-from ..state.store import load_progress, save_progress
+from ..state.store import load_course_progress, save_course_progress
 from .handlers.document import handle_document
 from .handlers.exam import handle_exam
 from .handlers.survey import handle_survey
@@ -234,13 +234,7 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
 
     Returns True if course completed successfully.
     """
-    progress = load_progress()
-    if not progress:
-        from ..state.models import RunProgress
-
-        progress = RunProgress()
-
-    course_prog = progress.courses.get(course_id)
+    course_prog = load_course_progress(course_id)
     if course_prog and course_prog.status == CourseStatus.DONE:
         logger.info("Course %s: already completed, skipping", course_id)
         return True
@@ -259,10 +253,9 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
                 course_prog = CourseProgress(
                     course_id=course_id, enrolled=True, status=CourseStatus.ENROLLED
                 )
-                progress.courses[course_id] = course_prog
             else:
                 course_prog.enrolled = True
-            save_progress(progress)
+            save_course_progress(course_id, course_prog)
 
             raw_materials = await parse_course_materials(page, course_id)
             if not course_prog.materials:
@@ -280,7 +273,7 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
                     for m in raw_materials
                 ]
             course_prog.status = CourseStatus.IN_PROGRESS
-            save_progress(progress)
+            save_course_progress(course_id, course_prog)
 
             await page.close()
             page = None  # Release the page and semaphore slot
@@ -293,11 +286,11 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
                 continue  # exams last
 
             mat.status = Status.IN_PROGRESS
-            save_progress(progress)
+            save_course_progress(course_id, course_prog)
 
             success = await _handle_material(context, mat)
             mat.status = Status.DONE if success else Status.PENDING
-            save_progress(progress)
+            save_course_progress(course_id, course_prog)
 
         # Step 4: Process exams
         for mat in course_prog.materials:
@@ -307,16 +300,16 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
                 continue
 
             mat.status = Status.IN_PROGRESS
-            save_progress(progress)
+            save_course_progress(course_id, course_prog)
 
             success = await _handle_material(context, mat)
             mat.status = Status.DONE if success else Status.PENDING
-            save_progress(progress)
+            save_course_progress(course_id, course_prog)
 
         # Step 5: Check completion
         all_done = all(m.status == Status.DONE for m in course_prog.materials)
         course_prog.status = CourseStatus.DONE if all_done else CourseStatus.IN_PROGRESS
-        save_progress(progress)
+        save_course_progress(course_id, course_prog)
 
         if all_done:
             logger.info("Course %s: completed!", course_id)

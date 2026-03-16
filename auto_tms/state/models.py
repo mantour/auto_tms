@@ -44,11 +44,10 @@ class CourseProgress(BaseModel):
     materials: list[MaterialProgress] = Field(default_factory=list)
 
 
-class RunProgress(BaseModel):
+class RunMeta(BaseModel):
     started_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     iteration: int = 1
-    courses: dict[str, CourseProgress] = Field(default_factory=dict)
 
 
 class PlannedCourse(BaseModel):

@@ -64,9 +64,12 @@ def load_credentials() -> tuple[str, str]:
     return user, passwd
 
 
+PROGRESS_DIR = STATE_DIR / "progress"
+
+
 def ensure_dirs() -> None:
     """Create data directories if they don't exist."""
-    for d in (SESSION_DIR, STATE_DIR, LOG_DIR):
+    for d in (SESSION_DIR, STATE_DIR, PROGRESS_DIR, LOG_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -79,13 +82,13 @@ def get_current_log_file() -> Path:
 def setup_logging(verbose: bool = False) -> logging.Logger:
     """Configure logging to file and stderr.
 
-    If progress.json exists (resume), append to the latest log file.
+    If run.json exists (resume), append to the latest log file.
     Otherwise, create a new timestamped log file.
     """
     ensure_dirs()
-    progress_file = STATE_DIR / "progress.json"
+    run_meta_file = STATE_DIR / "run.json"
     existing_log = get_current_log_file()
-    if progress_file.exists() and existing_log.exists():
+    if run_meta_file.exists() and existing_log.exists():
         log_file = existing_log  # Resume: append to existing log
     else:
         log_file = LOG_DIR / f"{datetime.now():%Y-%m-%d_%H%M%S}.log"

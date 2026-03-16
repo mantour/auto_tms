@@ -83,13 +83,14 @@ def log() -> None:
 
 
 def _status_cached(show_all: bool = False) -> None:
-    """Display status from cached plan.json + progress.json."""
-    from .state.store import load_plan, load_progress
+    """Display status from cached state files."""
+    from .state.store import load_all_courses, load_plan, load_run_meta
 
     plan = load_plan()
-    progress = load_progress()
+    run_meta = load_run_meta()
+    courses = load_all_courses()
 
-    if not plan and not progress:
+    if not plan and not courses:
         click.echo("No cached data. Run 'auto_tms run' first.")
         return
 
@@ -104,10 +105,10 @@ def _status_cached(show_all: bool = False) -> None:
             })
         _display_programs(programs, show_all, plan.created_at)
 
-    if progress:
-        _display_progress(progress, show_all)
+    if courses:
+        _display_progress(courses, show_all)
 
-    _display_pipeline_footer(plan, progress)
+    _display_pipeline_footer(plan, run_meta)
 
 
 async def _status_live(show_all: bool = False) -> None:
@@ -116,7 +117,7 @@ async def _status_live(show_all: bool = False) -> None:
     from .auth.login import ensure_authenticated
     from .planner.scraper import build_program_requirements, scrape_programs
     from .planner.shortfall import build_shortfall_plan
-    from .state.store import load_progress, save_plan
+    from .state.store import load_all_courses, load_run_meta, save_plan
 
     async with create_browser_context() as context:
         await ensure_authenticated(context)
@@ -126,7 +127,8 @@ async def _status_live(show_all: bool = False) -> None:
     plan = build_shortfall_plan(raw_programs, requirements)
     save_plan(plan)
 
-    progress = load_progress()
+    run_meta = load_run_meta()
+    courses = load_all_courses()
 
     status_data = []
     for prog in raw_programs:
@@ -138,10 +140,10 @@ async def _status_live(show_all: bool = False) -> None:
         })
     _display_programs(status_data, show_all)
 
-    if progress:
-        _display_progress(progress, show_all)
+    if courses:
+        _display_progress(courses, show_all)
 
-    _display_pipeline_footer(plan, progress)
+    _display_pipeline_footer(plan, run_meta)
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +237,7 @@ def _check_session_valid() -> str:
     return click.style(f"ok ({age_str} ago)", fg="green")
 
 
-def _display_pipeline_footer(plan, progress) -> None:
+def _display_pipeline_footer(plan, run_meta) -> None:
     """Display pipeline status footer: running state, errors, videos.
 
     Placed at the bottom so it's always visible in the terminal.
@@ -248,9 +250,9 @@ def _display_pipeline_footer(plan, progress) -> None:
         state = click.style("Stopped", fg="white")
 
     parts = [f"Pipeline: {state}"]
-    if progress:
-        parts.append(f"({progress.iteration}/3)")
-        uptime = datetime.now() - progress.started_at
+    if run_meta:
+        parts.append(f"({run_meta.iteration}/3)")
+        uptime = datetime.now() - run_meta.started_at
         parts.append(f"| {_format_duration(uptime)}")
 
     # Errors from log
@@ -345,15 +347,15 @@ def _display_programs(
 # ---------------------------------------------------------------------------
 
 
-def _display_progress(progress, show_all: bool = False) -> None:
-    """Display course execution progress from progress.json.
+def _display_progress(courses: dict, show_all: bool = False) -> None:
+    """Display course execution progress from per-course files.
 
     Default: only show active (in_progress) and failed courses.
     --all: show everything including done and pending.
     """
     from .state.models import CourseStatus, MaterialType, Status
 
-    if not progress.courses:
+    if not courses:
         return
 
     counts = {"done": 0, "in_progress": 0, "pending": 0, "failed": 0}
@@ -361,7 +363,7 @@ def _display_progress(progress, show_all: bool = False) -> None:
     total_remaining_minutes = 0
     display_rows: list[str] = []
 
-    for cid, cp in progress.courses.items():
+    for cid, cp in courses.items():
         total_materials = len(cp.materials)
         done_materials = sum(1 for m in cp.materials if m.status == Status.DONE)
 
@@ -406,7 +408,7 @@ def _display_progress(progress, show_all: bool = False) -> None:
     for key in ("done", "in_progress", "pending", "failed"):
         if counts[key]:
             parts.append(f"{counts[key]} {key}")
-    summary = f"{len(progress.courses)} courses: {', '.join(parts)}"
+    summary = f"{len(courses)} courses: {', '.join(parts)}"
     if total_remaining_minutes > 0:
         hours = total_remaining_minutes // 60
         mins = total_remaining_minutes % 60
@@ -444,23 +446,22 @@ async def _complete_courses(course_ids: list[str]) -> None:
     from .auth.browser import create_browser_context
     from .auth.login import ensure_authenticated
     from .engine.course import process_course
-    from .state.models import CourseProgress, CourseStatus, RunProgress
-    from .state.store import load_progress, save_progress
+    from .state.models import CourseProgress, CourseStatus
+    from .state.store import load_course_progress, save_course_progress
 
     logger = logging.getLogger("auto_tms")
 
-    progress = load_progress() or RunProgress()
+    # Ensure each course has a progress file
     for cid in course_ids:
-        if cid not in progress.courses:
-            progress.courses[cid] = CourseProgress(course_id=cid)
-    save_progress(progress)
+        if not load_course_progress(cid):
+            save_course_progress(cid, CourseProgress(course_id=cid))
 
     async with create_browser_context() as context:
         await ensure_authenticated(context)
 
         pending = [
             cid for cid in course_ids
-            if progress.courses[cid].status != CourseStatus.DONE
+            if (load_course_progress(cid) or CourseProgress(course_id=cid)).status != CourseStatus.DONE
         ]
         done_count = len(course_ids) - len(pending)
         if done_count:
@@ -516,12 +517,21 @@ async def _run_pipeline() -> None:
     from .engine.course import process_course
     from .planner.scraper import build_program_requirements, scrape_programs
     from .planner.shortfall import build_shortfall_plan
-    from .state.models import CourseProgress, CourseStatus, RunProgress
-    from .state.store import load_progress, save_plan, save_progress
+    from .state.models import CourseProgress, CourseStatus, RunMeta
+    from .state.store import (
+        load_course_progress,
+        load_run_meta,
+        save_course_progress,
+        save_plan,
+        save_run_meta,
+    )
 
     logger = logging.getLogger("auto_tms")
 
     MAX_ITERATIONS = 3
+
+    # Load or create run metadata
+    run_meta = load_run_meta() or RunMeta()
 
     async with create_browser_context() as context:
         await ensure_authenticated(context)
@@ -541,23 +551,21 @@ async def _run_pipeline() -> None:
 
             logger.info("Iteration %d: %d courses to complete", iteration, len(plan.courses))
 
-            # Load existing progress (preserves material-level completion)
-            progress = load_progress() or RunProgress()
-            progress.iteration = iteration
+            run_meta.iteration = iteration
+            save_run_meta(run_meta)
 
-            # Merge: add new courses, keep existing progress
+            # Check each course, create progress file if needed
             pending = []
             for planned in plan.courses:
                 cid = planned.course_id
-                if cid not in progress.courses:
-                    progress.courses[cid] = CourseProgress(
-                        course_id=cid, title=planned.title
-                    )
-                if progress.courses[cid].status == CourseStatus.DONE:
+                cp = load_course_progress(cid)
+                if not cp:
+                    cp = CourseProgress(course_id=cid, title=planned.title)
+                    save_course_progress(cid, cp)
+                if cp.status == CourseStatus.DONE:
                     logger.info("Course %s: already done", cid)
                     continue
                 pending.append(cid)
-            save_progress(progress)
 
             if not pending:
                 logger.info("All planned courses already done, verifying...")

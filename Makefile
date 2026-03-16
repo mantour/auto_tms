@@ -49,5 +49,6 @@ stop: ## Stop running pipeline
 	@pkill -f "auto_tms.*run" 2>/dev/null && echo "Stopped" || echo "Not running"
 
 reset: ## Clear plan and progress (start fresh)
-	@rm -f ~/.auto_tms/state/progress.json ~/.auto_tms/state/plan.json
+	@rm -f ~/.auto_tms/state/run.json ~/.auto_tms/state/plan.json
+	@rm -rf ~/.auto_tms/state/progress/
 	@echo "Cleared plan and progress"
