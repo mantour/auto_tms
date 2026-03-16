@@ -56,13 +56,14 @@ def run(ctx: click.Context, course_id: str | None, file_path: str | None) -> Non
 
 @cli.command()
 @click.option("--cached", is_flag=True, help="Use cached data (no network)")
+@click.option("--all", "show_all", is_flag=True, help="Show all programs and courses")
 @click.pass_context
-def status(ctx: click.Context, cached: bool) -> None:
+def status(ctx: click.Context, cached: bool, show_all: bool) -> None:
     """Show program completion and course progress."""
     if cached:
-        _status_cached()
+        _status_cached(show_all)
     else:
-        asyncio.run(_status_live())
+        asyncio.run(_status_live(show_all))
 
 
 @cli.command()
@@ -80,7 +81,7 @@ def log() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _status_cached() -> None:
+def _status_cached(show_all: bool = False) -> None:
     """Display status from cached plan.json + progress.json."""
     from .state.store import load_plan, load_progress
 
@@ -91,8 +92,6 @@ def _status_cached() -> None:
         click.echo("No cached data. Run 'auto_tms run' first.")
         return
 
-    _display_pipeline_header(plan, progress)
-
     if plan and plan.programs:
         programs = []
         for req in plan.programs:
@@ -102,13 +101,15 @@ def _status_cached() -> None:
                 "total_shortfall": max(0, req.total_required - req.total_completed),
                 "mandatory_shortfall": req.mandatory_required,
             })
-        _display_programs(programs, plan.created_at)
+        _display_programs(programs, show_all, plan.created_at)
 
     if progress:
-        _display_progress(progress)
+        _display_progress(progress, show_all)
+
+    _display_pipeline_footer(plan, progress)
 
 
-async def _status_live() -> None:
+async def _status_live(show_all: bool = False) -> None:
     """Scrape live data and display status + progress."""
     from .auth.browser import create_browser_context
     from .auth.login import ensure_authenticated
@@ -125,7 +126,6 @@ async def _status_live() -> None:
     save_plan(plan)
 
     progress = load_progress()
-    _display_pipeline_header(plan, progress)
 
     status_data = []
     for prog in raw_programs:
@@ -135,19 +135,12 @@ async def _status_live() -> None:
             "total_shortfall": prog.get("total_shortfall", 0),
             "mandatory_shortfall": prog.get("mandatory_shortfall", 0),
         })
-    _display_programs(status_data)
-
-    # Show course plan
-    if plan.courses:
-        click.echo(f"待修課程（{len(plan.courses)} 門）")
-        click.echo("-" * 80)
-        for c in plan.courses:
-            tag = click.style("必修", fg="red") if c.required else click.style("選修", fg="yellow")
-            click.echo(f"  [{tag}] {c.title} ({c.course_id}) — {c.credit_hours:.0f}h")
-        click.echo()
+    _display_programs(status_data, show_all)
 
     if progress:
-        _display_progress(progress)
+        _display_progress(progress, show_all)
+
+    _display_pipeline_footer(plan, progress)
 
 
 # ---------------------------------------------------------------------------
@@ -244,10 +237,11 @@ def _check_session_valid() -> str:
     return click.style(f"ok ({age_str} ago)", fg="green")
 
 
-def _display_pipeline_header(plan, progress) -> None:
-    """Display pipeline status header: running state, errors, videos."""
-    click.echo()
+def _display_pipeline_footer(plan, progress) -> None:
+    """Display pipeline status footer: running state, errors, videos.
 
+    Placed at the bottom so it's always visible in the terminal.
+    """
     # Running state
     running = _is_pipeline_running()
     if running:
@@ -255,46 +249,35 @@ def _display_pipeline_header(plan, progress) -> None:
     else:
         state = click.style("Stopped", fg="white")
 
-    iteration_str = ""
-    uptime_str = ""
+    parts = [f"Pipeline: {state}"]
     if progress:
-        iteration_str = f" (iteration {progress.iteration}/3)"
+        parts.append(f"({progress.iteration}/3)")
         uptime = datetime.now() - progress.started_at
-        uptime_str = f" | uptime {_format_duration(uptime)}"
+        parts.append(f"| {_format_duration(uptime)}")
 
     # Errors from log
     activity = _parse_log_activity()
-    error_str = ""
     if activity["error_count"]:
-        error_str = f" | " + click.style(f"errors: {activity['error_count']}", fg="red")
+        parts.append("| " + click.style(f"errors: {activity['error_count']}", fg="red"))
 
     # Session health
-    session_str = _check_session_valid()
+    parts.append(f"| session: {_check_session_valid()}")
 
-    click.echo(f"Pipeline: {state}{iteration_str}{uptime_str}{error_str}")
-    click.echo(f"Session: {session_str}")
-
-    # Last scrape time
-    if plan:
-        scrape_age = datetime.now() - plan.created_at
-        click.echo(f"Last scrape: {plan.created_at:%Y-%m-%d %H:%M} ({_format_duration(scrape_age)} ago)")
+    click.echo(" ".join(parts))
 
     # Playing videos
     if activity["playing_videos"]:
         vids = ", ".join(
-            f"{v['id']} (~{v['remaining_min']}m left)" for v in activity["playing_videos"]
+            f"{v['id']} (~{v['remaining_min']}m)" for v in activity["playing_videos"]
         )
         click.echo(click.style(f"Playing: {vids}", fg="cyan"))
 
     # Last error
     if activity["last_error"]:
-        # Truncate long error messages
         err_msg = activity["last_error"]
         if len(err_msg) > 100:
             err_msg = err_msg[:97] + "..."
         click.echo(click.style(f"Last error: {err_msg}", fg="red"))
-
-    click.echo()
 
 
 # ---------------------------------------------------------------------------
@@ -302,25 +285,41 @@ def _display_pipeline_header(plan, progress) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _display_programs(programs: list[dict], scrape_time: datetime | None = None) -> None:
-    """Display program completion status with progress bars."""
+def _display_programs(
+    programs: list[dict], show_all: bool = False, scrape_time: datetime | None = None,
+) -> None:
+    """Display program completion status with progress bars.
+
+    Default: only show incomplete programs. --all: show everything.
+    """
+    passed = sum(
+        1 for p in programs
+        if p.get("total_shortfall", 0) <= 0 and p.get("mandatory_shortfall", 0) <= 0
+    )
+    total = len(programs)
+
+    click.echo()
     ts = f"（{scrape_time:%Y-%m-%d %H:%M}）" if scrape_time else ""
-    click.echo(f"我的學程 — 完成度{ts}")
+    click.echo(f"我的學程 — {passed}/{total} 通過{ts}")
     click.echo("=" * 80)
 
-    all_pass = True
+    hidden = 0
     for prog in programs:
         name = prog.get("name", "")
         total_req = prog.get("total_required", 0)
         total_short = prog.get("total_shortfall", 0)
         mandatory_short = prog.get("mandatory_shortfall", 0)
         total_done = total_req - total_short
+        is_pass = total_short <= 0 and mandatory_short <= 0
 
-        if total_short <= 0 and mandatory_short <= 0:
+        if is_pass and not show_all:
+            hidden += 1
+            continue
+
+        if is_pass:
             mark = click.style("✓ 通過", fg="green")
         else:
             mark = click.style("✗ 未通過", fg="red")
-            all_pass = False
 
         bar_len = 20
         if total_req > 0:
@@ -336,14 +335,10 @@ def _display_programs(programs: list[dict], scrape_time: datetime | None = None)
         )
 
     click.echo("=" * 80)
-    if all_pass:
+    if passed == total:
         click.echo(click.style("所有學程皆已通過！", fg="green", bold=True))
-    else:
-        incomplete = sum(
-            1 for p in programs
-            if p.get("total_shortfall", 0) > 0 or p.get("mandatory_shortfall", 0) > 0
-        )
-        click.echo(f"共 {len(programs)} 個學程，{incomplete} 個未完成")
+    elif hidden:
+        click.echo(f"  + {hidden} 個已通過（--all 顯示）")
     click.echo()
 
 
@@ -352,19 +347,21 @@ def _display_programs(programs: list[dict], scrape_time: datetime | None = None)
 # ---------------------------------------------------------------------------
 
 
-def _display_progress(progress) -> None:
-    """Display course execution progress from progress.json."""
+def _display_progress(progress, show_all: bool = False) -> None:
+    """Display course execution progress from progress.json.
+
+    Default: only show active (in_progress) and failed courses.
+    --all: show everything including done and pending.
+    """
     from .state.models import CourseStatus, MaterialType, Status
 
     if not progress.courses:
         return
 
-    click.echo("課程執行進度")
-    click.echo("-" * 80)
-
     counts = {"done": 0, "in_progress": 0, "pending": 0, "failed": 0}
     failed_details: list[str] = []
     total_remaining_minutes = 0
+    display_rows: list[str] = []
 
     for cid, cp in progress.courses.items():
         total_materials = len(cp.materials)
@@ -374,6 +371,7 @@ def _display_progress(progress) -> None:
             icon = click.style("✓", fg="green")
             label = "done"
             counts["done"] += 1
+            visible = show_all
         elif cp.status == CourseStatus.IN_PROGRESS:
             has_failed = any(m.status == Status.SKIPPED for m in cp.materials)
             if has_failed:
@@ -387,42 +385,51 @@ def _display_progress(progress) -> None:
                 icon = click.style("◎", fg="yellow")
                 label = "in_progress"
                 counts["in_progress"] += 1
+            visible = True  # Always show active/failed
         else:
             icon = click.style("·", fg="white")
             label = "pending"
             counts["pending"] += 1
+            visible = show_all
 
-        # Estimate remaining video minutes for pending/in_progress courses
+        # Estimate remaining video minutes
         if cp.status != CourseStatus.DONE:
             for m in cp.materials:
                 if m.status != Status.DONE and m.material_type == MaterialType.VIDEO:
                     total_remaining_minutes += m.required_minutes or 0
 
-        title = cp.title or cid
-        mat_info = f"[{done_materials}/{total_materials}]" if total_materials else ""
-        click.echo(f"  {icon} {cid}  {title:<40s} {label:<14s} {mat_info}")
-
-    click.echo("-" * 80)
+        if visible:
+            title = cp.title or cid
+            mat_info = f"[{done_materials}/{total_materials}]" if total_materials else ""
+            display_rows.append(f"  {icon} {cid}  {title:<40s} {label:<14s} {mat_info}")
 
     # Summary line
     parts = []
     for key in ("done", "in_progress", "pending", "failed"):
         if counts[key]:
             parts.append(f"{counts[key]} {key}")
-    click.echo(f"{len(progress.courses)} courses: {', '.join(parts)}")
-
-    # Failed materials detail
-    if failed_details:
-        click.echo(click.style(f"Failed: {', '.join(failed_details)}", fg="red"))
-
-    # Estimated remaining time
+    summary = f"{len(progress.courses)} courses: {', '.join(parts)}"
     if total_remaining_minutes > 0:
         hours = total_remaining_minutes // 60
         mins = total_remaining_minutes % 60
-        if hours > 0:
-            click.echo(f"Estimated remaining: ~{hours}h {mins}m (pending videos)")
-        else:
-            click.echo(f"Estimated remaining: ~{mins}m (pending videos)")
+        est = f"{hours}h {mins}m" if hours else f"{mins}m"
+        summary += f" | ~{est} remaining"
+
+    click.echo(f"課程: {summary}")
+    click.echo("-" * 80)
+
+    for row in display_rows:
+        click.echo(row)
+
+    if not show_all:
+        hidden = counts["done"] + counts["pending"]
+        if hidden:
+            click.echo(f"  + {hidden} done/pending（--all 顯示）")
+
+    click.echo("-" * 80)
+
+    if failed_details:
+        click.echo(click.style(f"Failed: {', '.join(failed_details)}", fg="red"))
 
     click.echo()
 
