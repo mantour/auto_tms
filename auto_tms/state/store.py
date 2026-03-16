@@ -7,6 +7,8 @@ from pathlib import Path
 
 from .models import CoursePlan, RunProgress
 
+__all__ = ["load_progress", "save_progress", "load_plan", "save_plan"]
+
 logger = logging.getLogger("auto_tms.state")
 
 PROGRESS_FILE = Path.home() / ".auto_tms" / "state" / "progress.json"
@@ -75,8 +77,3 @@ def save_plan(plan: CoursePlan) -> None:
     logger.debug("Plan saved to %s", PLAN_FILE)
 
 
-def clear_progress() -> None:
-    """Remove progress file (for fresh runs)."""
-    if PROGRESS_FILE.exists():
-        PROGRESS_FILE.unlink()
-        logger.info("Cleared progress state")

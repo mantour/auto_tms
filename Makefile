@@ -3,10 +3,10 @@ VENV := .venv
 BIN := $(VENV)/bin
 AUTO_TMS := $(BIN)/auto_tms
 
-.PHONY: setup config status plan run complete log help
+.PHONY: setup config run status status-cached log stop help
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  make %-12s %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  make %-14s %s\n", $$1, $$2}'
 
 setup: ## Install dependencies and playwright
 	uv venv && uv pip install -e .
@@ -28,23 +28,21 @@ config: ## Configure credentials, host, and proxy
 	 if [ -n "$$proxy" ]; then echo "TMS_PROXY=$$proxy" >> .env; fi; \
 	 echo ""; echo "Saved to .env"
 
-status: ## Show 我的學程 completion status (cached)
-	@$(AUTO_TMS) status
-
-plan: ## Scrape live data and build course plan
-	$(AUTO_TMS) -v plan
-
-run: ## Full pipeline: plan → complete → verify
+run: ## Full pipeline (or: make run ID=198761)
+ifdef ID
+	$(AUTO_TMS) -v run $(ID)
+else
 	nohup $(AUTO_TMS) -v run > ~/.auto_tms/logs/run_output.log 2>&1 & echo "PID: $$!"
+endif
 
-complete: ## Complete one course: make complete ID=198761
-	$(AUTO_TMS) -v complete $(ID)
+status: ## Show live program & course status
+	$(AUTO_TMS) status
 
-log: ## Tail the pipeline log
-	@tail -f ~/.auto_tms/logs/run_output.log
+status-cached: ## Show cached status (no network)
+	$(AUTO_TMS) status --cached
 
-progress: ## Show pipeline progress summary
-	@$(BIN)/python3 -m auto_tms.progress
+log: ## Tail today's log
+	@$(AUTO_TMS) log
 
 stop: ## Stop running pipeline
 	@pkill -f "auto_tms.*run" 2>/dev/null && echo "Stopped" || echo "Not running"

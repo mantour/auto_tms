@@ -1,10 +1,14 @@
 """CLI entry point for auto_tms."""
 
 import asyncio
+import re
+import subprocess
+from datetime import datetime
+from pathlib import Path
 
 import click
 
-from .config import ensure_dirs, setup_logging
+from .config import DATA_DIR, SESSION_DIR, ensure_dirs, setup_logging
 
 MAX_CONCURRENT_COURSES = 10
 
@@ -21,72 +25,287 @@ def cli(ctx: click.Context, verbose: bool) -> None:
 
 
 @cli.command()
-@click.argument("course_id")
+@click.argument("course_id", required=False)
+@click.option("-f", "--file", "file_path", type=click.Path(exists=True), help="Course IDs file (one per line)")
 @click.pass_context
-def complete(ctx: click.Context, course_id: str) -> None:
-    """Complete a single course by ID."""
-    logger = ctx.obj["logger"]
-    logger.info("Completing course %s", course_id)
-    asyncio.run(_complete_courses([course_id]))
+def run(ctx: click.Context, course_id: str | None, file_path: str | None) -> None:
+    """Run pipeline or complete specific courses.
 
-
-@cli.command("complete-file")
-@click.argument("file", type=click.Path(exists=True))
-@click.pass_context
-def complete_file(ctx: click.Context, file: str) -> None:
-    """Complete courses listed in a file (one course ID per line)."""
+    \b
+    auto_tms run                 Full pipeline (plan → complete → verify)
+    auto_tms run <courseId>       Complete one course
+    auto_tms run -f courses.txt  Complete courses from file
+    """
     logger = ctx.obj["logger"]
-    with open(file, encoding="utf-8") as f:
-        course_ids = [line.strip() for line in f if line.strip()]
-    logger.info("Completing %d courses from %s", len(course_ids), file)
-    asyncio.run(_complete_courses(course_ids))
+
+    if course_id and file_path:
+        raise click.UsageError("Cannot specify both course_id and --file")
+
+    if course_id:
+        logger.info("Completing course %s", course_id)
+        asyncio.run(_complete_courses([course_id]))
+    elif file_path:
+        with open(file_path, encoding="utf-8") as f:
+            course_ids = [line.strip() for line in f if line.strip()]
+        logger.info("Completing %d courses from %s", len(course_ids), file_path)
+        asyncio.run(_complete_courses(course_ids))
+    else:
+        logger.info("Starting full pipeline")
+        asyncio.run(_run_pipeline())
 
 
 @cli.command()
+@click.option("--cached", is_flag=True, help="Use cached data (no network)")
 @click.pass_context
-def plan(ctx: click.Context) -> None:
-    """Scrape training programs and build a shortfall course list."""
-    logger = ctx.obj["logger"]
-    logger.info("Building course plan from 我的學程...")
-    asyncio.run(_plan())
+def status(ctx: click.Context, cached: bool) -> None:
+    """Show program completion and course progress."""
+    if cached:
+        _status_cached()
+    else:
+        asyncio.run(_status_live())
 
 
 @cli.command()
-@click.pass_context
-def run(ctx: click.Context) -> None:
-    """Full pipeline: plan → complete → verify, up to 3 iterations."""
-    logger = ctx.obj["logger"]
-    logger.info("Starting full pipeline")
-    asyncio.run(_run_pipeline())
+def log() -> None:
+    """Tail today's log file."""
+    log_file = DATA_DIR / "logs" / f"{datetime.now():%Y-%m-%d}.log"
+    if not log_file.exists():
+        click.echo(f"No log file for today ({log_file})")
+        return
+    subprocess.run(["tail", "-f", str(log_file)])
 
 
-@cli.command()
-@click.pass_context
-def status(ctx: click.Context) -> None:
-    """Show 我的學程 completion status (from cached data)."""
-    from .state.store import load_plan
+# ---------------------------------------------------------------------------
+# Status display
+# ---------------------------------------------------------------------------
+
+
+def _status_cached() -> None:
+    """Display status from cached plan.json + progress.json."""
+    from .state.store import load_plan, load_progress
 
     plan = load_plan()
-    if not plan or not plan.programs:
-        click.echo("No cached data. Run 'auto_tms plan' first.")
+    progress = load_progress()
+
+    if not plan and not progress:
+        click.echo("No cached data. Run 'auto_tms run' first.")
         return
 
-    programs = []
-    for req in plan.programs:
-        programs.append({
-            "name": req.program_name,
-            "total_required": req.total_required,
-            "total_shortfall": max(0, req.total_required - req.total_completed),
-            "mandatory_shortfall": req.mandatory_required,
+    _display_pipeline_header(plan, progress)
+
+    if plan and plan.programs:
+        programs = []
+        for req in plan.programs:
+            programs.append({
+                "name": req.program_name,
+                "total_required": req.total_required,
+                "total_shortfall": max(0, req.total_required - req.total_completed),
+                "mandatory_shortfall": req.mandatory_required,
+            })
+        _display_programs(programs, plan.created_at)
+
+    if progress:
+        _display_progress(progress)
+
+
+async def _status_live() -> None:
+    """Scrape live data and display status + progress."""
+    from .auth.browser import create_browser_context
+    from .auth.login import ensure_authenticated
+    from .planner.scraper import build_program_requirements, scrape_programs
+    from .planner.shortfall import build_shortfall_plan
+    from .state.store import load_progress, save_plan
+
+    async with create_browser_context() as context:
+        await ensure_authenticated(context)
+        raw_programs = await scrape_programs(context)
+
+    requirements = build_program_requirements(raw_programs)
+    plan = build_shortfall_plan(raw_programs, requirements)
+    save_plan(plan)
+
+    progress = load_progress()
+    _display_pipeline_header(plan, progress)
+
+    status_data = []
+    for prog in raw_programs:
+        status_data.append({
+            "name": prog.get("name", ""),
+            "total_required": prog.get("total_required", 0),
+            "total_shortfall": prog.get("total_shortfall", 0),
+            "mandatory_shortfall": prog.get("mandatory_shortfall", 0),
         })
+    _display_programs(status_data)
 
-    _display_status(programs)
+    # Show course plan
+    if plan.courses:
+        click.echo(f"待修課程（{len(plan.courses)} 門）")
+        click.echo("-" * 80)
+        for c in plan.courses:
+            tag = click.style("必修", fg="red") if c.required else click.style("選修", fg="yellow")
+            click.echo(f"  [{tag}] {c.title} ({c.course_id}) — {c.credit_hours:.0f}h")
+        click.echo()
+
+    if progress:
+        _display_progress(progress)
 
 
-def _display_status(programs: list[dict]) -> None:
-    """Display program completion status with progress bars."""
+# ---------------------------------------------------------------------------
+# Pipeline header: running state, errors, playing videos
+# ---------------------------------------------------------------------------
+
+
+def _is_pipeline_running() -> bool:
+    """Check if the pipeline process is running."""
+    result = subprocess.run(
+        ["pgrep", "-f", "auto_tms.*run"],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0
+
+
+def _parse_log_activity() -> dict:
+    """Parse today's log for active videos, errors, and last error message."""
+    log_file = DATA_DIR / "logs" / f"{datetime.now():%Y-%m-%d}.log"
+    if not log_file.exists():
+        return {"playing_videos": [], "error_count": 0, "last_error": ""}
+
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+
+    # Track currently playing videos (started but not finished)
+    video_started: dict[str, dict] = {}  # media_id -> {minutes, timestamp}
+    for line in lines:
+        m = re.search(
+            r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+.*Video .*/media/(\d+): waiting (\d+) min",
+            line,
+        )
+        if m:
+            ts_str, media_id, minutes = m.group(1), m.group(2), int(m.group(3))
+            try:
+                ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                ts = None
+            video_started[media_id] = {"minutes": minutes, "started": ts}
+            continue
+        m = re.search(r"Video .*/media/(\d+): playback time reached", line)
+        if m:
+            video_started.pop(m.group(1), None)
+
+    # Calculate remaining time for each playing video
+    now = datetime.now()
+    playing = []
+    for media_id, info in video_started.items():
+        if info["started"]:
+            elapsed = (now - info["started"]).total_seconds() / 60
+            remaining = max(0, info["minutes"] - elapsed)
+            playing.append({"id": media_id, "remaining_min": round(remaining)})
+        else:
+            playing.append({"id": media_id, "remaining_min": info["minutes"]})
+
+    # Count errors and find last error
+    error_count = 0
+    last_error = ""
+    for line in lines:
+        if "ERROR" in line:
+            error_count += 1
+            # Strip timestamp prefix for display
+            m = re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+\s+ERROR\s+(.*)", line)
+            last_error = m.group(1).strip() if m else line.strip()
+
+    return {
+        "playing_videos": playing,
+        "error_count": error_count,
+        "last_error": last_error,
+    }
+
+
+def _format_duration(td) -> str:
+    """Format a timedelta as 'Xh Ym'."""
+    total_seconds = int(td.total_seconds())
+    if total_seconds < 0:
+        return "0m"
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes = remainder // 60
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def _check_session_valid() -> str:
+    """Check if the Playwright session file exists and is fresh."""
+    state_file = SESSION_DIR / "storage_state.json"
+    if not state_file.exists():
+        return click.style("no session", fg="red")
+    mtime = datetime.fromtimestamp(state_file.stat().st_mtime)
+    age = datetime.now() - mtime
+    age_str = _format_duration(age)
+    if age.total_seconds() > 3600 * 4:
+        return click.style(f"stale ({age_str} ago)", fg="red")
+    return click.style(f"ok ({age_str} ago)", fg="green")
+
+
+def _display_pipeline_header(plan, progress) -> None:
+    """Display pipeline status header: running state, errors, videos."""
     click.echo()
-    click.echo("我的學程 — 完成度")
+
+    # Running state
+    running = _is_pipeline_running()
+    if running:
+        state = click.style("Running", fg="green")
+    else:
+        state = click.style("Stopped", fg="white")
+
+    iteration_str = ""
+    uptime_str = ""
+    if progress:
+        iteration_str = f" (iteration {progress.iteration}/3)"
+        uptime = datetime.now() - progress.started_at
+        uptime_str = f" | uptime {_format_duration(uptime)}"
+
+    # Errors from log
+    activity = _parse_log_activity()
+    error_str = ""
+    if activity["error_count"]:
+        error_str = f" | " + click.style(f"errors: {activity['error_count']}", fg="red")
+
+    # Session health
+    session_str = _check_session_valid()
+
+    click.echo(f"Pipeline: {state}{iteration_str}{uptime_str}{error_str}")
+    click.echo(f"Session: {session_str}")
+
+    # Last scrape time
+    if plan:
+        scrape_age = datetime.now() - plan.created_at
+        click.echo(f"Last scrape: {plan.created_at:%Y-%m-%d %H:%M} ({_format_duration(scrape_age)} ago)")
+
+    # Playing videos
+    if activity["playing_videos"]:
+        vids = ", ".join(
+            f"{v['id']} (~{v['remaining_min']}m left)" for v in activity["playing_videos"]
+        )
+        click.echo(click.style(f"Playing: {vids}", fg="cyan"))
+
+    # Last error
+    if activity["last_error"]:
+        # Truncate long error messages
+        err_msg = activity["last_error"]
+        if len(err_msg) > 100:
+            err_msg = err_msg[:97] + "..."
+        click.echo(click.style(f"Last error: {err_msg}", fg="red"))
+
+    click.echo()
+
+
+# ---------------------------------------------------------------------------
+# Program completion display
+# ---------------------------------------------------------------------------
+
+
+def _display_programs(programs: list[dict], scrape_time: datetime | None = None) -> None:
+    """Display program completion status with progress bars."""
+    ts = f"（{scrape_time:%Y-%m-%d %H:%M}）" if scrape_time else ""
+    click.echo(f"我的學程 — 完成度{ts}")
     click.echo("=" * 80)
 
     all_pass = True
@@ -128,6 +347,91 @@ def _display_status(programs: list[dict]) -> None:
     click.echo()
 
 
+# ---------------------------------------------------------------------------
+# Course progress display
+# ---------------------------------------------------------------------------
+
+
+def _display_progress(progress) -> None:
+    """Display course execution progress from progress.json."""
+    from .state.models import CourseStatus, MaterialType, Status
+
+    if not progress.courses:
+        return
+
+    click.echo("課程執行進度")
+    click.echo("-" * 80)
+
+    counts = {"done": 0, "in_progress": 0, "pending": 0, "failed": 0}
+    failed_details: list[str] = []
+    total_remaining_minutes = 0
+
+    for cid, cp in progress.courses.items():
+        total_materials = len(cp.materials)
+        done_materials = sum(1 for m in cp.materials if m.status == Status.DONE)
+
+        if cp.status == CourseStatus.DONE:
+            icon = click.style("✓", fg="green")
+            label = "done"
+            counts["done"] += 1
+        elif cp.status == CourseStatus.IN_PROGRESS:
+            has_failed = any(m.status == Status.SKIPPED for m in cp.materials)
+            if has_failed:
+                icon = click.style("✗", fg="red")
+                label = "incomplete"
+                counts["failed"] += 1
+                for m in cp.materials:
+                    if m.status == Status.SKIPPED:
+                        failed_details.append(f"{cid}/{m.material_id}")
+            else:
+                icon = click.style("◎", fg="yellow")
+                label = "in_progress"
+                counts["in_progress"] += 1
+        else:
+            icon = click.style("·", fg="white")
+            label = "pending"
+            counts["pending"] += 1
+
+        # Estimate remaining video minutes for pending/in_progress courses
+        if cp.status != CourseStatus.DONE:
+            for m in cp.materials:
+                if m.status != Status.DONE and m.material_type == MaterialType.VIDEO:
+                    total_remaining_minutes += m.required_minutes or 0
+
+        title = cp.title or cid
+        mat_info = f"[{done_materials}/{total_materials}]" if total_materials else ""
+        click.echo(f"  {icon} {cid}  {title:<40s} {label:<14s} {mat_info}")
+
+    click.echo("-" * 80)
+
+    # Summary line
+    parts = []
+    for key in ("done", "in_progress", "pending", "failed"):
+        if counts[key]:
+            parts.append(f"{counts[key]} {key}")
+    click.echo(f"{len(progress.courses)} courses: {', '.join(parts)}")
+
+    # Failed materials detail
+    if failed_details:
+        click.echo(click.style(f"Failed: {', '.join(failed_details)}", fg="red"))
+
+    # Estimated remaining time
+    if total_remaining_minutes > 0:
+        hours = total_remaining_minutes // 60
+        mins = total_remaining_minutes % 60
+        if hours > 0:
+            click.echo(f"Estimated remaining: ~{hours}h {mins}m (pending videos)")
+        else:
+            click.echo(f"Estimated remaining: ~{mins}m (pending videos)")
+
+    click.echo()
+
+
+# ---------------------------------------------------------------------------
+# Course completion
+# ---------------------------------------------------------------------------
+
+
 async def _complete_courses(course_ids: list[str]) -> None:
     """Complete a list of courses (up to 10 concurrently)."""
     import logging
@@ -149,7 +453,6 @@ async def _complete_courses(course_ids: list[str]) -> None:
     async with create_browser_context() as context:
         await ensure_authenticated(context)
 
-        # Filter out already-done courses
         pending = [
             cid for cid in course_ids
             if progress.courses[cid].status != CourseStatus.DONE
@@ -190,49 +493,17 @@ async def _complete_courses(course_ids: list[str]) -> None:
         logger.info("Batch done: %d completed, %d incomplete", completed, failed)
 
 
-async def _plan() -> None:
-    """Build shortfall plan and display status."""
-    from .auth.browser import create_browser_context
-    from .auth.login import ensure_authenticated
-    from .planner.scraper import build_program_requirements, scrape_programs
-    from .planner.shortfall import build_shortfall_plan
-    from .state.store import save_plan
-
-    async with create_browser_context() as context:
-        await ensure_authenticated(context)
-
-        raw_programs = await scrape_programs(context)
-        requirements = build_program_requirements(raw_programs)
-
-        plan = build_shortfall_plan(raw_programs, requirements)
-        save_plan(plan)
-
-    # Display status (reuse shared display logic)
-    status_data = []
-    for prog in raw_programs:
-        status_data.append({
-            "name": prog.get("name", ""),
-            "total_required": prog.get("total_required", 0),
-            "total_shortfall": prog.get("total_shortfall", 0),
-            "mandatory_shortfall": prog.get("mandatory_shortfall", 0),
-        })
-    _display_status(status_data)
-
-    # Display course plan
-    if plan.courses:
-        click.echo(f"待修課程（{len(plan.courses)} 門）")
-        click.echo("-" * 80)
-        for c in plan.courses:
-            tag = click.style("必修", fg="red") if c.required else click.style("選修", fg="yellow")
-            click.echo(f"  [{tag}] {c.title} ({c.course_id}) — {c.credit_hours:.0f}h")
-        click.echo()
-    else:
-        click.echo(click.style("無需修課！", fg="green", bold=True))
-        click.echo()
+# ---------------------------------------------------------------------------
+# Full pipeline
+# ---------------------------------------------------------------------------
 
 
 async def _run_pipeline() -> None:
-    """Run full pipeline: plan → complete concurrently → verify, up to 3 iterations."""
+    """Run full pipeline: plan → complete → verify, up to 3 iterations.
+
+    Progress is preserved across iterations — completed materials (videos,
+    surveys, etc.) are never re-processed.
+    """
     import logging
 
     from .auth.browser import create_browser_context
@@ -241,7 +512,7 @@ async def _run_pipeline() -> None:
     from .planner.scraper import build_program_requirements, scrape_programs
     from .planner.shortfall import build_shortfall_plan
     from .state.models import CourseProgress, CourseStatus, RunProgress
-    from .state.store import clear_progress, load_progress, save_plan, save_progress
+    from .state.store import load_progress, save_plan, save_progress
 
     logger = logging.getLogger("auto_tms")
 
@@ -253,7 +524,7 @@ async def _run_pipeline() -> None:
         for iteration in range(1, MAX_ITERATIONS + 1):
             logger.info("=== Pipeline iteration %d/%d ===", iteration, MAX_ITERATIONS)
 
-            # Build plan
+            # Always re-scrape to get latest state from website
             raw_programs = await scrape_programs(context)
             requirements = build_program_requirements(raw_programs)
             plan = build_shortfall_plan(raw_programs, requirements)
@@ -265,11 +536,11 @@ async def _run_pipeline() -> None:
 
             logger.info("Iteration %d: %d courses to complete", iteration, len(plan.courses))
 
-            # Load or create progress
+            # Load existing progress (preserves material-level completion)
             progress = load_progress() or RunProgress()
             progress.iteration = iteration
 
-            # Prepare pending courses
+            # Merge: add new courses, keep existing progress
             pending = []
             for planned in plan.courses:
                 cid = planned.course_id
@@ -284,8 +555,7 @@ async def _run_pipeline() -> None:
             save_progress(progress)
 
             if not pending:
-                logger.info("All planned courses already done, re-checking...")
-                clear_progress()
+                logger.info("All planned courses already done, verifying...")
                 continue
 
             logger.info(
@@ -318,9 +588,6 @@ async def _run_pipeline() -> None:
                 completed,
                 failed,
             )
-
-            # Clear progress for next iteration's fresh check
-            clear_progress()
 
         # Final check
         raw_programs = await scrape_programs(context)

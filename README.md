@@ -35,20 +35,20 @@ make config       # 設定帳號密碼、API key、主機位址
 ## 使用
 
 ```bash
-# 查看學程完成狀況（使用快取資料）
-make status
-
-# 掃描學程、計算缺口、產生修課計畫
-make plan
-
 # 全自動執行（背景運行）
 make run
 
+# 完成單一課程
+make run ID=198761
+
+# 查看學程完成狀況 + 課程進度（即時）
+make status
+
+# 查看快取狀態（不連網）
+make status-cached
+
 # 查看即時 log
 make log
-
-# 完成單一課程
-make complete ID=198761
 
 # 停止執行中的流程
 make stop
@@ -57,11 +57,13 @@ make stop
 也可以直接使用 CLI：
 
 ```bash
-auto_tms plan                        # 建立修課計畫
-auto_tms complete <courseId>         # 完成單一課程
-auto_tms complete-file courses.txt   # 從檔案批次完成
-auto_tms run                         # 全自動流程
-auto_tms -v <command>                # 顯示詳細 log
+auto_tms run                    # 全自動流程
+auto_tms run <courseId>         # 完成單一課程
+auto_tms run -f courses.txt    # 從檔案批次完成
+auto_tms status                 # 即時狀態
+auto_tms status --cached        # 快取狀態
+auto_tms log                    # 查看 log
+auto_tms -v <command>           # 顯示詳細 log
 ```
 
 ## 資料目錄
