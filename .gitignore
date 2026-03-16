@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+dist/
+build/
+.eggs/
+.env
+CLAUDE.md
+description.md
+openspec/

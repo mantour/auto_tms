@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto_tms"
+version = "0.1.0"
+description = "教育訓練系統自動化測試工具"
+authors = [{name = "Yen-Ju Chu", email = "mantour.tw@gmail.com"}]
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.40",
+    "anthropic>=0.40",
+    "click>=8.1",
+    "pydantic>=2.5",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+auto_tms = "auto_tms.cli:cli"
+
+[tool.setuptools.packages.find]
+include = ["auto_tms*"]
