@@ -226,15 +226,12 @@ def _format_duration(td) -> str:
 
 
 def _check_session_valid() -> str:
-    """Check if the Playwright session file exists and is fresh."""
+    """Check if a Playwright session file exists and when it was last used."""
     state_file = SESSION_DIR / "storage_state.json"
     if not state_file.exists():
         return click.style("no session", fg="red")
     mtime = datetime.fromtimestamp(state_file.stat().st_mtime)
-    age = datetime.now() - mtime
-    age_str = _format_duration(age)
-    if age.total_seconds() > 3600 * 4:
-        return click.style(f"stale ({age_str} ago)", fg="red")
+    age_str = _format_duration(datetime.now() - mtime)
     return click.style(f"ok ({age_str} ago)", fg="green")
 
 

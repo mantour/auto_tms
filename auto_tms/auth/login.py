@@ -96,6 +96,7 @@ async def ensure_authenticated(context: BrowserContext) -> Page:
 
     base = get_base_url()
     if await is_session_valid(context, base):
+        await save_session(context)  # Update mtime so status shows fresh
         page = await context.new_page()
         await page.goto(f"{base}/program/mine", wait_until="load")
         return page
