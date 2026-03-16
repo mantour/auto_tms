@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from .config import DATA_DIR, SESSION_DIR, ensure_dirs, setup_logging
+from .config import DATA_DIR, SESSION_DIR, ensure_dirs, get_current_log_file, setup_logging
 
 MAX_CONCURRENT_COURSES = 10
 
@@ -68,11 +68,12 @@ def status(ctx: click.Context, cached: bool, show_all: bool) -> None:
 
 @cli.command()
 def log() -> None:
-    """Tail today's log file."""
-    log_file = DATA_DIR / "logs" / f"{datetime.now():%Y-%m-%d}.log"
+    """Tail the latest log file."""
+    log_file = get_current_log_file()
     if not log_file.exists():
-        click.echo(f"No log file for today ({log_file})")
+        click.echo("No log files found.")
         return
+    click.echo(f"Tailing {log_file.name}")
     subprocess.run(["tail", "-f", str(log_file)])
 
 
@@ -158,8 +159,8 @@ def _is_pipeline_running() -> bool:
 
 
 def _parse_log_activity() -> dict:
-    """Parse today's log for active videos, errors, and last error message."""
-    log_file = DATA_DIR / "logs" / f"{datetime.now():%Y-%m-%d}.log"
+    """Parse the latest log for active videos, errors, and last error message."""
+    log_file = get_current_log_file()
     if not log_file.exists():
         return {"playing_videos": [], "error_count": 0, "last_error": ""}
 

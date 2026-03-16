@@ -70,10 +70,25 @@ def ensure_dirs() -> None:
         d.mkdir(parents=True, exist_ok=True)
 
 
+def get_current_log_file() -> Path:
+    """Return the most recent log file, or None."""
+    log_files = sorted(LOG_DIR.glob("*.log"), key=lambda p: p.name, reverse=True)
+    return log_files[0] if log_files else LOG_DIR / "no-log-yet.log"
+
+
 def setup_logging(verbose: bool = False) -> logging.Logger:
-    """Configure logging to file and stderr."""
+    """Configure logging to file and stderr.
+
+    If progress.json exists (resume), append to the latest log file.
+    Otherwise, create a new timestamped log file.
+    """
     ensure_dirs()
-    log_file = LOG_DIR / f"{datetime.now():%Y-%m-%d}.log"
+    progress_file = STATE_DIR / "progress.json"
+    existing_log = get_current_log_file()
+    if progress_file.exists() and existing_log.exists():
+        log_file = existing_log  # Resume: append to existing log
+    else:
+        log_file = LOG_DIR / f"{datetime.now():%Y-%m-%d_%H%M%S}.log"
 
     logger = logging.getLogger("auto_tms")
     logger.setLevel(logging.DEBUG)
