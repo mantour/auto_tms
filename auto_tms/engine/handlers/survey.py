@@ -56,7 +56,7 @@ async def handle_survey(context: BrowserContext, url: str) -> bool:
             () => {
                 const names = new Set();
                 document.querySelectorAll('input[type="radio"]').forEach(r => {
-                    if (r.name) names.add(r.name);
+                    if (r.name && !r.name.startsWith('mobile_')) names.add(r.name);
                 });
                 return [...names];
             }
@@ -68,8 +68,8 @@ async def handle_survey(context: BrowserContext, url: str) -> bool:
             if await first_radio.count() > 0:
                 await first_radio.click(force=True)
 
-        # Fill text areas with「無」
-        textareas = page.locator("textarea")
+        # Fill visible text areas with「無」
+        textareas = page.locator("textarea:visible")
         for i in range(await textareas.count()):
             await textareas.nth(i).fill("無")
 
