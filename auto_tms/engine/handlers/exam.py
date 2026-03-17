@@ -15,7 +15,7 @@ from ...config import DATA_DIR
 logger = logging.getLogger("auto_tms.engine.handlers.exam")
 
 MAX_CLAUDE_ATTEMPTS = 3
-MAX_EXAM_ATTEMPTS = 50  # Accommodate brute force
+MAX_EXAM_ATTEMPTS = 30  # Claude + score search + fallback brute force
 EXAM_MEMORY_DIR = DATA_DIR / "state" / "exam_memory"
 
 
@@ -56,6 +56,238 @@ def _extract_exam_id(url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Exam attempt helpers
+# ---------------------------------------------------------------------------
+
+
+async def _enter_exam(context: BrowserContext, url: str):
+    """Navigate to exam, click start, wait for questions. Returns (page, questions) or (None, None)."""
+    page = await context.new_page()
+    await page.goto(url, wait_until="networkidle")
+
+    exam_btn = page.locator('button:has-text("測驗")')
+    if await exam_btn.count() > 0:
+        btn_text = (await exam_btn.first.text_content() or "").strip()
+        logger.info("Exam %s: clicking '%s'", url, btn_text)
+        async with page.expect_navigation(wait_until="networkidle", timeout=30000):
+            await exam_btn.first.click()
+    else:
+        logger.error("Exam %s: no exam button found", url)
+        await page.close()
+        return None, None
+
+    try:
+        await page.wait_for_selector(".kques-item", state="attached", timeout=15000)
+    except Exception:
+        logger.error("Exam %s: questions did not load", url)
+        await page.close()
+        return None, None
+
+    questions = await _scrape_questions(page)
+    if not questions:
+        logger.error("Exam %s: no questions found", url)
+        await page.close()
+        return None, None
+
+    return page, questions
+
+
+async def _submit_exam(page) -> int | None:
+    """Fill answers should already be done. Submit exam and return score, or None."""
+    submit_btn = page.locator('button:has-text("交卷"), a:has-text("交卷")')
+    if await submit_btn.count() > 0:
+        await submit_btn.first.click()
+        await page.wait_for_timeout(3000)
+        modal_confirm = page.locator(
+            '.modal button:has-text("交卷"), '
+            '.modal button:has-text("確定"), '
+            '.modal button:has-text("確認")'
+        )
+        if await modal_confirm.count() > 0 and await modal_confirm.first.is_visible():
+            await modal_confirm.first.click()
+            logger.debug("Confirmed submit dialog")
+        await page.wait_for_timeout(5000)
+
+    return await _parse_score(page)
+
+
+async def _parse_score(page) -> int | None:
+    """Parse score from result page. Returns score int or None."""
+    body = await page.evaluate("() => document.body.innerText")
+    match = re.search(r"分數[：:]\s*(\d+)\s*/\s*(\d+)", body)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+async def _do_one_attempt(
+    context: BrowserContext, url: str, questions_override: list[dict] | None,
+    answers: dict[int, str], course_id: str | None, exam_id: str, memory: dict,
+    method: str, attempt_num: int,
+) -> tuple[bool, int | None, list[dict]]:
+    """Execute one exam attempt. Returns (passed, score, questions)."""
+    page, questions = await _enter_exam(context, url)
+    if not page:
+        return False, None, questions_override or []
+
+    if questions_override:
+        # Check if questions match
+        current_texts = {q["question"].strip() for q in questions}
+        expected_texts = {q["question"].strip() for q in questions_override}
+        if current_texts != expected_texts:
+            logger.warning("Exam %s: questions changed, resetting", url)
+            questions_override = None  # Fall through to use new questions
+
+    if questions_override:
+        questions = questions_override
+
+    logger.info("Exam %s: attempt %d, %d questions, method=%s", url, attempt_num, len(questions), method)
+
+    await _fill_answers(page, questions, answers)
+    score = await _submit_exam(page)
+    logger.info("Exam %s: score %s", url, score)
+
+    # Build attempt_answers
+    attempt_answers = {}
+    for q in questions:
+        q_text = q["question"].strip()
+        idx = q["index"]
+        if idx in answers:
+            attempt_answers[q_text] = answers[idx]
+
+    # Harvest
+    harvested = await _harvest_correct_answers(page, attempt_answers)
+    if harvested:
+        memory["correct"].update(harvested)
+
+    await page.close()
+
+    # Check web pass
+    passed = False
+    if course_id:
+        passed = await _check_web_pass(context, course_id, exam_id)
+
+    # Record attempt
+    memory["attempts"].append({
+        "answers": attempt_answers, "method": method, "score": score,
+    })
+    if passed:
+        memory["correct"].update(attempt_answers)
+    _save_memory(exam_id, memory)
+
+    return passed, score, questions
+
+
+# ---------------------------------------------------------------------------
+# Score-based per-question search (Type B exams)
+# ---------------------------------------------------------------------------
+
+
+async def _score_search(
+    context: BrowserContext, url: str, course_id: str | None,
+    exam_id: str, memory: dict, baseline_questions: list[dict],
+    baseline_answers: dict[int, str], baseline_score: int,
+) -> bool:
+    """Search for correct answers one question at a time using score differences.
+
+    For each unconfirmed question, swap to each alternative answer and compare
+    the resulting score with baseline. Score increase = found correct answer.
+    """
+    confirmed: dict[int, str] = dict(baseline_answers)  # Will be updated as we confirm
+    points_per_q = baseline_score  # Will be recalculated
+    total_questions = len(baseline_questions)
+    if total_questions > 0:
+        # Infer points per question from total (e.g. 100/5=20 or 100/10=10)
+        points_per_q = 100 // total_questions
+
+    current_score = baseline_score
+    questions = baseline_questions
+
+    # Track which questions are confirmed correct
+    confirmed_indices: set[int] = set()
+    # If score is already 100, we're done (shouldn't be here but safety check)
+    if current_score >= 100:
+        return True
+
+    for q in questions:
+        idx = q["index"]
+        if idx in confirmed_indices:
+            continue
+
+        baseline_sn = confirmed[idx]
+        alternatives = [c["sn"] for c in q["choices"] if c["sn"] != baseline_sn]
+
+        found = False
+        for alt_sn in alternatives:
+            # Swap this one question
+            test_answers = dict(confirmed)
+            test_answers[idx] = alt_sn
+
+            passed, score, new_questions = await _do_one_attempt(
+                context, url, questions, test_answers, course_id, exam_id,
+                memory, "score_search",
+                len(memory.get("attempts", [])) + 1,
+            )
+
+            if passed:
+                logger.info("Exam %s: PASSED during score search!", url)
+                return True
+
+            if score is None:
+                logger.warning("Exam %s: could not parse score, skipping question", url)
+                break
+
+            # Check if questions changed (question bank)
+            current_texts = {q["question"].strip() for q in new_questions}
+            expected_texts = {q["question"].strip() for q in questions}
+            if current_texts != expected_texts:
+                logger.warning("Exam %s: questions changed during score search, aborting", url)
+                return False
+
+            if score > current_score:
+                # Found correct answer for this question
+                logger.info("Exam %s: Q%d correct=%s (score %d→%d)",
+                            url, idx + 1, alt_sn, current_score, score)
+                confirmed[idx] = alt_sn
+                confirmed_indices.add(idx)
+                current_score = score
+                found = True
+                break
+            elif score < current_score:
+                # Baseline was correct for this question
+                logger.info("Exam %s: Q%d baseline=%s confirmed correct (score dropped %d→%d)",
+                            url, idx + 1, baseline_sn, current_score, score)
+                confirmed_indices.add(idx)
+                found = True
+                break
+            # else: same score → both wrong, try next alternative
+
+        if not found and not alternatives:
+            # Only one choice (shouldn't happen)
+            confirmed_indices.add(idx)
+
+        if not found:
+            # All alternatives tried, score never changed → baseline was correct
+            logger.info("Exam %s: Q%d baseline=%s correct by elimination", url, idx + 1, baseline_sn)
+            confirmed_indices.add(idx)
+
+    # Final attempt with all confirmed answers
+    if current_score < 100:
+        logger.info("Exam %s: final attempt with confirmed answers", url)
+        passed, score, _ = await _do_one_attempt(
+            context, url, questions, confirmed, course_id, exam_id,
+            memory, "score_search_final",
+            len(memory.get("attempts", [])) + 1,
+        )
+        if passed:
+            logger.info("Exam %s: PASSED on final attempt!", url)
+            return True
+        logger.warning("Exam %s: score search completed but still not passed (score=%s)", url, score)
+
+    return current_score >= 100
+
+
+# ---------------------------------------------------------------------------
 # Main handler
 # ---------------------------------------------------------------------------
 
@@ -65,14 +297,11 @@ async def handle_exam(
 ) -> bool:
     """Solve a multiple-choice exam using Claude API with persistent answer memory.
 
-    Flow:
-    1. Navigate to exam info page
-    2. Click「開始測驗」or「繼續測驗」
-    3. Wait for kexam JS to render questions
-    4. Use known correct answers + ask Claude for unknowns
-    5. Ensure answer combination is not a repeat of previous failed attempts
-    6. Submit and check pass via course page web status
-    7. Update memory (correct on pass, record attempt on fail)
+    Strategy:
+    1. Claude attempts (up to MAX_CLAUDE_ATTEMPTS) — Type A exams harvest correct answers
+    2. If not passed and Type A: use harvested correct answers directly
+    3. If not passed and Type B: score-based per-question search
+    4. Fallback: brute force enumeration
 
     Returns True if exam passed.
     """
@@ -83,127 +312,79 @@ async def handle_exam(
     exam_id = _extract_exam_id(url)
     memory = _load_memory(exam_id)
 
-    for attempt in range(1, MAX_EXAM_ATTEMPTS + 1):
-        logger.info("Exam %s: attempt %d/%d", url, attempt, MAX_EXAM_ATTEMPTS)
+    best_score = 0
+    best_answers: dict[int, str] = {}
+    best_questions: list[dict] = []
 
-        page = await context.new_page()
-        try:
-            # Step 1: Navigate to exam info page
-            await page.goto(url, wait_until="networkidle")
+    # Phase 1: Claude attempts
+    for attempt in range(1, MAX_CLAUDE_ATTEMPTS + 1):
+        page, questions = await _enter_exam(context, url)
+        if not page:
+            continue
 
-            # Step 2: Click start/continue button
-            exam_btn = page.locator('button:has-text("測驗")')
-            if await exam_btn.count() > 0:
-                btn_text = (await exam_btn.first.text_content() or "").strip()
-                logger.info("Exam %s: clicking '%s'", url, btn_text)
-                async with page.expect_navigation(
-                    wait_until="networkidle", timeout=30000
-                ):
-                    await exam_btn.first.click()
-            else:
-                logger.error("Exam %s: no exam button found on info page", url)
-                await page.close()
-                continue
+        answers = await _get_answers(questions, memory)
+        answers = _ensure_unique_combination(questions, answers, memory)
 
-            # Step 3: Wait for questions to render
-            try:
-                await page.wait_for_selector(
-                    ".kques-item", state="attached", timeout=15000
-                )
-            except Exception:
-                logger.error("Exam %s: questions did not load", url)
-                await page.close()
-                continue
+        passed, score, questions = await _do_one_attempt(
+            context, url, None, answers, course_id, exam_id,
+            memory, "claude", attempt,
+        )
 
-            # Step 4: Scrape questions
-            questions = await _scrape_questions(page)
-            if not questions:
-                logger.error("Exam %s: no questions found after waiting", url)
-                await page.close()
-                continue
+        if passed:
+            return True
 
-            logger.info("Exam %s: found %d questions", url, len(questions))
+        if score is not None and score > best_score:
+            best_score = score
+            best_answers = answers
+            best_questions = questions
 
-            # Step 5: Get answers
-            claude_attempts = sum(
-                1 for a in memory.get("attempts", []) if a.get("method") != "brute"
+    # Phase 2: If Type A (has harvested correct answers), try them
+    if memory.get("correct"):
+        logger.info("Exam %s: trying %d harvested correct answers", url, len(memory["correct"]))
+        page, questions = await _enter_exam(context, url)
+        if page:
+            answers = await _get_answers(questions, memory)  # Uses correct from memory
+            passed, score, questions = await _do_one_attempt(
+                context, url, None, answers, course_id, exam_id,
+                memory, "harvest_retry", MAX_CLAUDE_ATTEMPTS + 1,
             )
-            if claude_attempts < MAX_CLAUDE_ATTEMPTS:
-                # Use Claude with attempt history
-                answers = await _get_answers(questions, memory)
-                answers = _ensure_unique_combination(questions, answers, memory)
-                method = "claude"
-            else:
-                # Switch to brute force
-                answers = _brute_force_answers(questions, memory)
-                if answers is None:
-                    logger.error("Exam %s: all brute force combinations exhausted", url)
-                    await page.close()
-                    break
-                method = "brute"
-                logger.info("Exam %s: using brute force (attempt %d)", url, attempt)
-
-            # Step 6: Fill in answers
-            await _fill_answers(page, questions, answers)
-
-            # Step 7: Submit (交卷)
-            submit_btn = page.locator('button:has-text("交卷"), a:has-text("交卷")')
-            if await submit_btn.count() > 0:
-                await submit_btn.first.click()
-                await page.wait_for_timeout(3000)
-                # Handle confirmation dialog (button text may be「交卷」or「確定」)
-                modal_confirm = page.locator(
-                    '.modal button:has-text("交卷"), '
-                    '.modal button:has-text("確定"), '
-                    '.modal button:has-text("確認")'
-                )
-                if await modal_confirm.count() > 0 and await modal_confirm.first.is_visible():
-                    await modal_confirm.first.click()
-                    logger.debug("Exam %s: confirmed submit dialog", url)
-                await page.wait_for_timeout(5000)
-            else:
-                logger.warning("Exam %s: no submit button found", url)
-
-            # Build attempt_answers for harvest (keyed by question text)
-            attempt_answers = {}
-            for q in questions:
-                q_text = q["question"].strip()
-                idx = q["index"]
-                if idx in answers:
-                    attempt_answers[q_text] = answers[idx]
-
-            # Harvest correct answers if shown on result page
-            harvested = await _harvest_correct_answers(page, attempt_answers)
-            if harvested:
-                memory["correct"].update(harvested)
-
-            await page.close()
-            page = None
-
-            # Step 8: Check pass via course page web status
-            if course_id:
-                passed = await _check_web_pass(context, course_id, exam_id)
-            else:
-                passed = bool(harvested)
-                logger.warning("Exam %s: no course_id, can't verify via web", url)
-
             if passed:
-                logger.info("Exam %s: PASSED on attempt %d", url, attempt)
-                memory["correct"].update(attempt_answers)
-                _save_memory(exam_id, memory)
                 return True
-            else:
-                logger.info("Exam %s: did not pass on attempt %d", url, attempt)
-                memory["attempts"].append({"answers": attempt_answers, "method": method})
-                _save_memory(exam_id, memory)
+            if score is not None and score > best_score:
+                best_score = score
+                best_answers = answers
+                best_questions = questions
 
-        except Exception:
-            logger.error("Exam %s: attempt %d failed", url, attempt, exc_info=True)
-        finally:
-            if page:
-                await page.close()
+    # Phase 3: Score-based search (Type B — no harvest)
+    if best_questions and best_score > 0 and best_score < 100:
+        logger.info("Exam %s: starting score search (baseline=%d)", url, best_score)
+        passed = await _score_search(
+            context, url, course_id, exam_id, memory,
+            best_questions, best_answers, best_score,
+        )
+        if passed:
+            return True
 
-    logger.error("Exam %s: failed after %d attempts", url, MAX_EXAM_ATTEMPTS)
+    # Phase 4: Brute force fallback
+    remaining = MAX_EXAM_ATTEMPTS - len(memory.get("attempts", []))
+    if remaining > 0:
+        logger.info("Exam %s: falling back to brute force (%d attempts left)", url, remaining)
+        for _ in range(remaining):
+            page, questions = await _enter_exam(context, url)
+            if not page:
+                continue
+            answers = _brute_force_answers(questions, memory)
+            if answers is None:
+                logger.error("Exam %s: all brute force combinations exhausted", url)
+                break
+            passed, score, _ = await _do_one_attempt(
+                context, url, None, answers, course_id, exam_id,
+                memory, "brute", len(memory.get("attempts", [])) + 1,
+            )
+            if passed:
+                return True
+
+    logger.error("Exam %s: failed after %d attempts", url, len(memory.get("attempts", [])))
     return False
 
 
