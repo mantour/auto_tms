@@ -1,27 +1,76 @@
-"""Exam handler — Claude API for answering, with retry and answer harvesting."""
+"""Exam handler — Claude API for answering, with persistent answer memory."""
 
+import json
 import logging
+import random
 import re
+from pathlib import Path
 
 import anthropic
 from playwright.async_api import BrowserContext
 
+from ...config import DATA_DIR
+
 logger = logging.getLogger("auto_tms.engine.handlers.exam")
 
 MAX_EXAM_ATTEMPTS = 5
+EXAM_MEMORY_DIR = DATA_DIR / "state" / "exam_memory"
 
 
-async def handle_exam(context: BrowserContext, url: str) -> bool:
-    """Solve a multiple-choice exam using Claude API.
+# ---------------------------------------------------------------------------
+# Exam memory persistence
+# ---------------------------------------------------------------------------
+
+
+def _memory_path(exam_id: str) -> Path:
+    return EXAM_MEMORY_DIR / f"{exam_id}.json"
+
+
+def _load_memory(exam_id: str) -> dict:
+    """Load exam answer memory from file.
+
+    Structure: {"attempts": [{"answers": {q_text: sn}}], "correct": {q_text: sn}}
+    """
+    path = _memory_path(exam_id)
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Failed to load exam memory %s", path)
+    return {"attempts": [], "correct": {}}
+
+
+def _save_memory(exam_id: str, memory: dict) -> None:
+    EXAM_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    _memory_path(exam_id).write_text(
+        json.dumps(memory, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _extract_exam_id(url: str) -> str:
+    """Extract exam ID from URL like /course/199575/exam/33128."""
+    match = re.search(r"/exam/(\d+)", url)
+    return match.group(1) if match else url.split("/")[-1].split("?")[0]
+
+
+# ---------------------------------------------------------------------------
+# Main handler
+# ---------------------------------------------------------------------------
+
+
+async def handle_exam(
+    context: BrowserContext, url: str, course_id: str | None = None
+) -> bool:
+    """Solve a multiple-choice exam using Claude API with persistent answer memory.
 
     Flow:
     1. Navigate to exam info page
-    2. Click 開始測驗 to enter the exam
-    3. Wait for questions to load (networkidle on /kexam/ page)
-    4. Scrape questions from div.kques-item elements
-    5. Ask Claude for answers
-    6. Fill in radio buttons and submit (交卷)
-    7. On failure: harvest correct answers if shown, retry
+    2. Click「開始測驗」or「繼續測驗」
+    3. Wait for kexam JS to render questions
+    4. Use known correct answers + ask Claude for unknowns
+    5. Ensure answer combination is not a repeat of previous failed attempts
+    6. Submit and check pass via course page web status
+    7. Update memory (correct on pass, record attempt on fail)
 
     Returns True if exam passed.
     """
@@ -29,7 +78,8 @@ async def handle_exam(context: BrowserContext, url: str) -> bool:
         from ...config import get_base_url
         url = f"{get_base_url()}{url}"
 
-    known_answers: dict[int, str] = {}
+    exam_id = _extract_exam_id(url)
+    memory = _load_memory(exam_id)
 
     for attempt in range(1, MAX_EXAM_ATTEMPTS + 1):
         logger.info("Exam %s: attempt %d/%d", url, attempt, MAX_EXAM_ATTEMPTS)
@@ -37,68 +87,154 @@ async def handle_exam(context: BrowserContext, url: str) -> bool:
         page = await context.new_page()
         try:
             # Step 1: Navigate to exam info page
-            await page.goto(url, wait_until="load")
+            await page.goto(url, wait_until="networkidle")
 
-            # Step 2: Click 開始測驗 button
-            start_btn = page.locator('button:has-text("開始測驗")')
-            if await start_btn.count() > 0:
-                logger.debug("Clicking 開始測驗")
-                await start_btn.first.click()
-                # Wait for the kexam page to load
-                await page.wait_for_load_state("networkidle", timeout=120000)
-                await page.wait_for_timeout(3000)
+            # Step 2: Click start/continue button
+            exam_btn = page.locator('button:has-text("測驗")')
+            if await exam_btn.count() > 0:
+                btn_text = (await exam_btn.first.text_content() or "").strip()
+                logger.info("Exam %s: clicking '%s'", url, btn_text)
+                async with page.expect_navigation(
+                    wait_until="networkidle", timeout=30000
+                ):
+                    await exam_btn.first.click()
             else:
-                logger.debug("No 開始測驗 button, already on exam page")
+                logger.error("Exam %s: no exam button found on info page", url)
+                await page.close()
+                continue
 
-            # Step 3: Scrape questions
+            # Step 3: Wait for questions to render
+            try:
+                await page.wait_for_selector(
+                    ".kques-item", state="attached", timeout=15000
+                )
+            except Exception:
+                logger.error("Exam %s: questions did not load", url)
+                await page.close()
+                continue
+
+            # Step 4: Scrape questions
             questions = await _scrape_questions(page)
             if not questions:
-                logger.error("Exam %s: no questions found", url)
+                logger.error("Exam %s: no questions found after waiting", url)
                 await page.close()
                 continue
 
             logger.info("Exam %s: found %d questions", url, len(questions))
 
-            # Step 4: Get answers from Claude (or known answers)
-            answers = await _get_answers(questions, known_answers)
+            # Step 5: Get answers (known correct + Claude for rest)
+            answers = await _get_answers(questions, memory)
 
-            # Step 5: Fill in answers
+            # Ensure this combination is not a repeat
+            answers = _ensure_unique_combination(questions, answers, memory)
+
+            # Step 6: Fill in answers
             await _fill_answers(page, questions, answers)
 
-            # Step 6: Submit (交卷)
+            # Step 7: Submit (交卷)
             submit_btn = page.locator('button:has-text("交卷"), a:has-text("交卷")')
             if await submit_btn.count() > 0:
                 await submit_btn.first.click()
-                # Handle confirmation dialog if any
-                confirm_btn = page.locator('button:has-text("確定"), button:has-text("確認"), .btn-primary:has-text("確")')
                 await page.wait_for_timeout(2000)
+                # Handle confirmation dialog
+                confirm_btn = page.locator(
+                    'button:has-text("確定"), button:has-text("確認")'
+                )
                 if await confirm_btn.count() > 0 and await confirm_btn.first.is_visible():
                     await confirm_btn.first.click()
                 await page.wait_for_timeout(5000)
             else:
                 logger.warning("Exam %s: no submit button found", url)
 
-            # Step 7: Check result
-            passed = await _check_pass(page)
-            if passed:
-                logger.info("Exam %s: PASSED on attempt %d", url, attempt)
-                return True
-
-            logger.info("Exam %s: did not pass, checking for correct answers", url)
-
-            # Harvest correct answers if shown
+            # Harvest correct answers if shown on result page
             harvested = await _harvest_correct_answers(page)
             if harvested:
-                known_answers.update(harvested)
+                memory["correct"].update(harvested)
                 logger.info("Exam %s: harvested %d correct answers", url, len(harvested))
+
+            await page.close()
+            page = None
+
+            # Step 8: Check pass via course page web status
+            if course_id:
+                passed = await _check_web_pass(context, course_id, exam_id)
+            else:
+                # Fallback: can't check web status without course_id
+                passed = bool(harvested)  # Assume pass if we could harvest
+                logger.warning("Exam %s: no course_id, can't verify via web", url)
+
+            # Record this attempt's answers (keyed by question text)
+            attempt_answers = {}
+            for q in questions:
+                q_text = q["question"].strip()
+                idx = q["index"]
+                if idx in answers:
+                    attempt_answers[q_text] = answers[idx]
+
+            if passed:
+                logger.info("Exam %s: PASSED on attempt %d", url, attempt)
+                memory["correct"].update(attempt_answers)
+                _save_memory(exam_id, memory)
+                return True
+            else:
+                logger.info("Exam %s: did not pass on attempt %d", url, attempt)
+                memory["attempts"].append({"answers": attempt_answers})
+                _save_memory(exam_id, memory)
 
         except Exception:
             logger.error("Exam %s: attempt %d failed", url, attempt, exc_info=True)
         finally:
-            await page.close()
+            if page:
+                await page.close()
 
     logger.error("Exam %s: failed after %d attempts", url, MAX_EXAM_ATTEMPTS)
     return False
+
+
+# ---------------------------------------------------------------------------
+# Check pass via course page
+# ---------------------------------------------------------------------------
+
+
+async def _check_web_pass(
+    context: BrowserContext, course_id: str, exam_id: str
+) -> bool:
+    """Navigate to course page and check if this exam's ext-col has .item-pass."""
+    from ...config import get_base_url
+
+    page = await context.new_page()
+    try:
+        await page.goto(
+            f"{get_base_url()}/course/{course_id}", wait_until="networkidle"
+        )
+        # Find the xtree-node for this exam (URL contains exam/{exam_id})
+        passed = await page.evaluate(
+            """(examId) => {
+                const nodes = document.querySelectorAll('li.xtree-node');
+                for (const node of nodes) {
+                    const link = node.querySelector('a');
+                    if (link && link.href && link.href.includes('/exam/' + examId)) {
+                        const cols = node.querySelectorAll('.ext-col');
+                        if (cols.length >= 4) {
+                            return cols[3].querySelector('.item-pass') !== null;
+                        }
+                    }
+                }
+                return false;
+            }""",
+            exam_id,
+        )
+        return passed
+    except Exception:
+        logger.warning("Failed to check web pass for exam %s", exam_id, exc_info=True)
+        return False
+    finally:
+        await page.close()
+
+
+# ---------------------------------------------------------------------------
+# Question scraping
+# ---------------------------------------------------------------------------
 
 
 async def _scrape_questions(page) -> list[dict]:
@@ -139,30 +275,82 @@ async def _scrape_questions(page) -> list[dict]:
     return questions
 
 
+# ---------------------------------------------------------------------------
+# Answer selection
+# ---------------------------------------------------------------------------
+
+
 async def _get_answers(
-    questions: list[dict], known_answers: dict[int, str]
+    questions: list[dict], memory: dict
 ) -> dict[int, str]:
-    """Get answers for questions. Returns dict of question_index -> choice sn (A/B/C/D).
+    """Get answers: use known correct first, then ask Claude for the rest."""
+    correct = memory.get("correct", {})
 
-    Uses known answers first, then asks Claude for the rest.
-    """
-    unknown = [q for q in questions if q["index"] not in known_answers]
-
-    claude_answers: dict[int, str] = {}
-    if unknown:
-        claude_answers = await _ask_claude(unknown)
-
-    # Merge
     result: dict[int, str] = {}
+    unknown: list[dict] = []
+
     for q in questions:
-        idx = q["index"]
-        if idx in known_answers:
-            result[idx] = known_answers[idx]
-        elif idx in claude_answers:
-            result[idx] = claude_answers[idx]
-        elif q["choices"]:
-            result[idx] = q["choices"][0]["sn"]  # fallback: first choice
+        q_text = q["question"].strip()
+        if q_text in correct:
+            result[q["index"]] = correct[q_text]
+            logger.debug("Q%d: using known correct answer %s", q["index"] + 1, correct[q_text])
+        else:
+            unknown.append(q)
+
+    if unknown:
+        logger.info("Asking Claude for %d/%d questions", len(unknown), len(questions))
+        claude_answers = await _ask_claude(unknown)
+        result.update(claude_answers)
+
+    # Fallback for any still missing
+    for q in questions:
+        if q["index"] not in result and q["choices"]:
+            result[q["index"]] = q["choices"][0]["sn"]
+
     return result
+
+
+def _ensure_unique_combination(
+    questions: list[dict], answers: dict[int, str], memory: dict
+) -> dict[int, str]:
+    """Ensure this answer combination differs from all previous failed attempts."""
+    previous_combos = []
+    for att in memory.get("attempts", []):
+        combo = {}
+        for q in questions:
+            q_text = q["question"].strip()
+            if q_text in att["answers"]:
+                combo[q["index"]] = att["answers"][q_text]
+        if combo:
+            previous_combos.append(combo)
+
+    if not previous_combos:
+        return answers
+
+    # Check if current answers match any previous attempt
+    current = {idx: sn for idx, sn in answers.items()}
+    for prev in previous_combos:
+        if all(current.get(idx) == sn for idx, sn in prev.items()):
+            # Duplicate — change one non-correct answer randomly
+            correct = memory.get("correct", {})
+            changeable = [
+                q for q in questions
+                if q["question"].strip() not in correct and len(q["choices"]) > 1
+            ]
+            if changeable:
+                q = random.choice(changeable)
+                current_sn = current.get(q["index"], "")
+                other_choices = [c["sn"] for c in q["choices"] if c["sn"] != current_sn]
+                if other_choices:
+                    new_sn = random.choice(other_choices)
+                    answers[q["index"]] = new_sn
+                    logger.info(
+                        "Avoiding duplicate combo: changed Q%d from %s to %s",
+                        q["index"] + 1, current_sn, new_sn,
+                    )
+            break
+
+    return answers
 
 
 async def _ask_claude(questions: list[dict]) -> dict[int, str]:
@@ -199,11 +387,16 @@ async def _ask_claude(questions: list[dict]) -> dict[int, str]:
         line = line.strip()
         match = re.match(r"Q(\d+)\s*:\s*([A-Da-d])", line)
         if match:
-            idx = int(match.group(1)) - 1  # convert back to 0-indexed
+            idx = int(match.group(1)) - 1
             letter = match.group(2).upper()
             answers[idx] = letter
 
     return answers
+
+
+# ---------------------------------------------------------------------------
+# Answer filling
+# ---------------------------------------------------------------------------
 
 
 async def _fill_answers(page, questions: list[dict], answers: dict[int, str]) -> None:
@@ -214,7 +407,6 @@ async def _fill_answers(page, questions: list[dict], answers: dict[int, str]) ->
         if not selected_sn:
             continue
 
-        # Find the matching choice
         for choice in q["choices"]:
             if choice["sn"] == selected_sn:
                 if choice["name"] and choice["value"]:
@@ -222,13 +414,13 @@ async def _fill_answers(page, questions: list[dict], answers: dict[int, str]) ->
                         f'input[name="{choice["name"]}"][value="{choice["value"]}"]'
                     )
                     if await radio.count() > 0:
-                        await radio.first.click()
+                        await radio.first.click(force=True)
                         logger.debug("Q%d: selected %s", idx + 1, selected_sn)
                         break
                 elif choice["inputId"]:
                     radio = page.locator(f'#{choice["inputId"]}')
                     if await radio.count() > 0:
-                        await radio.first.click()
+                        await radio.first.click(force=True)
                         logger.debug("Q%d: selected %s", idx + 1, selected_sn)
                         break
         else:
@@ -238,43 +430,27 @@ async def _fill_answers(page, questions: list[dict], answers: dict[int, str]) ->
             if 0 <= target_idx < await items.count():
                 radio = items.nth(target_idx).locator('input')
                 if await radio.count() > 0:
-                    await radio.first.click()
+                    await radio.first.click(force=True)
                     logger.debug("Q%d: selected %s (by position)", idx + 1, selected_sn)
 
 
-async def _check_pass(page) -> bool:
-    """Check if the exam was passed after submission."""
-    content = await page.content()
-    # Check for score or pass indicators
-    fail_indicators = ["未通過", "不及格", "未達"]
-    pass_indicators = ["通過", "及格", "合格", "恭喜"]
-
-    for indicator in fail_indicators:
-        if indicator in content:
-            return False
-    for indicator in pass_indicators:
-        if indicator in content:
-            return True
-
-    # Try to find score
-    score_match = re.search(r"(\d+)\s*分", content)
-    if score_match:
-        score = int(score_match.group(1))
-        logger.info("Exam score: %d", score)
-        return score >= 100  # 測驗及格: 100分
-
-    return False
+# ---------------------------------------------------------------------------
+# Answer harvesting
+# ---------------------------------------------------------------------------
 
 
-async def _harvest_correct_answers(page) -> dict[int, str]:
+async def _harvest_correct_answers(page) -> dict[str, str]:
     """Try to extract correct answers from the result/review page.
 
-    Returns dict of question_index -> correct choice letter (A/B/C/D).
+    Returns dict of question_text -> correct choice letter (A/B/C/D).
     """
     harvested = await page.evaluate("""
         () => {
             const answers = {};
-            document.querySelectorAll('.kques-item').forEach((item, idx) => {
+            document.querySelectorAll('.kques-item').forEach((item) => {
+                const questionText = item.querySelector('.question')?.textContent?.trim() || '';
+                if (!questionText) return;
+
                 // Look for correct answer markers
                 const correctEl = item.querySelector(
                     '.option-item.correct, .option-item.right, ' +
@@ -282,7 +458,7 @@ async def _harvest_correct_answers(page) -> dict[int, str]:
                 );
                 if (correctEl) {
                     const sn = correctEl.querySelector('.optionSn')?.textContent?.trim()?.replace('.', '') || '';
-                    if (sn) answers[idx] = sn;
+                    if (sn) answers[questionText] = sn;
                 }
 
                 // Also check for checked correct answers (green highlight etc.)
@@ -290,11 +466,11 @@ async def _harvest_correct_answers(page) -> dict[int, str]:
                     const classes = li.className || '';
                     if (classes.includes('correct') || classes.includes('right')) {
                         const sn = li.querySelector('.optionSn')?.textContent?.trim()?.replace('.', '') || '';
-                        if (sn) answers[idx] = sn;
+                        if (sn) answers[questionText] = sn;
                     }
                 });
             });
             return answers;
         }
     """)
-    return {int(k): v for k, v in harvested.items()} if harvested else {}
+    return harvested if harvested else {}

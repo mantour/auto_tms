@@ -271,6 +271,89 @@ def _extract_required_minutes(text: str) -> int | None:
     return None
 
 
+async def _check_material_web_pass(
+    context: BrowserContext, course_id: str, material_id: str
+) -> bool:
+    """Navigate to course page and check if a specific material has .item-pass.
+
+    Matches by numeric ID extracted from material_id (e.g. video_273090 → 273090).
+    """
+    numeric_id = re.sub(r"^(video|doc|survey|exam)_", "", material_id)
+
+    page = await context.new_page()
+    try:
+        await page.goto(
+            f"{get_base_url()}/course/{course_id}", wait_until="networkidle"
+        )
+        passed = await page.evaluate(
+            """(numericId) => {
+                const nodes = document.querySelectorAll('li.xtree-node');
+                for (const node of nodes) {
+                    const links = node.querySelectorAll('a');
+                    for (const link of links) {
+                        if (link.href && link.href.includes('/' + numericId)) {
+                            const cols = node.querySelectorAll('.ext-col');
+                            if (cols.length >= 4) {
+                                return cols[3].querySelector('.item-pass') !== null;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }""",
+            numeric_id,
+        )
+        return passed
+    except Exception:
+        logger.warning("Failed to check web pass for %s", material_id, exc_info=True)
+        return False
+    finally:
+        await page.close()
+
+
+async def _check_all_materials_web(
+    context: BrowserContext, course_id: str
+) -> dict[str, bool]:
+    """Navigate to course page and check .item-pass for all materials.
+
+    Returns dict of material_id_suffix → bool (pass status).
+    Matches xtree-node links by numeric ID in the URL.
+    """
+    page = await context.new_page()
+    try:
+        await page.goto(
+            f"{get_base_url()}/course/{course_id}", wait_until="networkidle"
+        )
+        results = await page.evaluate("""
+            () => {
+                const statuses = {};
+                document.querySelectorAll('li.xtree-node').forEach(node => {
+                    const cols = node.querySelectorAll('.ext-col');
+                    const passed = cols.length >= 4 &&
+                        cols[3].querySelector('.item-pass') !== null;
+
+                    // Extract numeric ID from links
+                    const links = node.querySelectorAll('a');
+                    for (const link of links) {
+                        const href = link.href || '';
+                        const match = href.match(/\\/(media|poll|exam|quiz)\\/(\\d+)/);
+                        if (match) {
+                            statuses[match[2]] = passed;
+                            break;
+                        }
+                    }
+                });
+                return statuses;
+            }
+        """)
+        return results
+    except Exception:
+        logger.warning("Failed to check web statuses for course %s", course_id, exc_info=True)
+        return {}
+    finally:
+        await page.close()
+
+
 async def process_course(context: BrowserContext, course_id: str) -> bool:
     """Process a single course end-to-end.
 
@@ -364,8 +447,23 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
             mat.status = Status.IN_PROGRESS
             save_course_progress(course_id, course_prog)
 
-            success = await _handle_material(context, mat)
-            mat.status = Status.DONE if success else Status.PENDING
+            success = await _handle_material(context, mat, course_id)
+            if success:
+                # Verify via web
+                async with _page_semaphore:
+                    web_pass = await _check_material_web_pass(
+                        context, course_id, mat.material_id
+                    )
+                if web_pass:
+                    mat.status = Status.DONE
+                else:
+                    logger.warning(
+                        "  %s: handler succeeded but web not passed yet",
+                        mat.material_id,
+                    )
+                    mat.status = Status.PENDING
+            else:
+                mat.status = Status.PENDING
             save_course_progress(course_id, course_prog)
 
         # Step 4: Process exams
@@ -378,11 +476,34 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
             mat.status = Status.IN_PROGRESS
             save_course_progress(course_id, course_prog)
 
-            success = await _handle_material(context, mat)
-            mat.status = Status.DONE if success else Status.PENDING
+            success = await _handle_material(context, mat, course_id)
+            if success:
+                async with _page_semaphore:
+                    web_pass = await _check_material_web_pass(
+                        context, course_id, mat.material_id
+                    )
+                if web_pass:
+                    mat.status = Status.DONE
+                else:
+                    logger.warning(
+                        "  %s: handler succeeded but web not passed yet",
+                        mat.material_id,
+                    )
+                    mat.status = Status.PENDING
+            else:
+                mat.status = Status.PENDING
             save_course_progress(course_id, course_prog)
 
-        # Step 5: Check completion
+        # Step 5: Final web verification — check all materials at once
+        async with _page_semaphore:
+            web_statuses = await _check_all_materials_web(context, course_id)
+        if web_statuses:
+            for mat in course_prog.materials:
+                numeric_id = re.sub(r"^(video|doc|survey|exam)_", "", mat.material_id)
+                if web_statuses.get(numeric_id) and mat.status != Status.DONE:
+                    logger.info("  %s: web confirms PASS on final check", mat.material_id)
+                    mat.status = Status.DONE
+
         all_done = all(m.status == Status.DONE for m in course_prog.materials)
         course_prog.status = CourseStatus.DONE if all_done else CourseStatus.IN_PROGRESS
         save_course_progress(course_id, course_prog)
@@ -403,7 +524,9 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
             await page.close()
 
 
-async def _handle_material(context: BrowserContext, mat) -> bool:
+async def _handle_material(
+    context: BrowserContext, mat, course_id: str | None = None
+) -> bool:
     """Dispatch to the appropriate material handler with semaphore and retry."""
     for attempt in range(1, MAX_MATERIAL_RETRIES + 1):
         async with _page_semaphore:
@@ -425,7 +548,7 @@ async def _handle_material(context: BrowserContext, mat) -> bool:
                 elif mat.material_type == MaterialType.SURVEY:
                     result = await handle_survey(context, mat.url)
                 elif mat.material_type == MaterialType.EXAM:
-                    result = await handle_exam(context, mat.url)
+                    result = await handle_exam(context, mat.url, course_id)
                 else:
                     result = False
 
