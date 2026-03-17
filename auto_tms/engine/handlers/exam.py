@@ -121,25 +121,42 @@ async def _parse_score(page) -> int | None:
 
 
 async def _do_one_attempt(
-    context: BrowserContext, url: str, questions_override: list[dict] | None,
+    context: BrowserContext, url: str, expected_questions: list[dict] | None,
     answers: dict[int, str], course_id: str | None, exam_id: str, memory: dict,
     method: str, attempt_num: int,
 ) -> tuple[bool, int | None, list[dict]]:
-    """Execute one exam attempt. Returns (passed, score, questions)."""
+    """Execute one exam attempt. Returns (passed, score, questions).
+
+    Always uses freshly scraped questions for fill_answers (correct name/value).
+    If expected_questions is provided, maps answers by question text to new indices.
+    """
     page, questions = await _enter_exam(context, url)
     if not page:
-        return False, None, questions_override or []
+        return False, None, expected_questions or []
 
-    if questions_override:
+    if expected_questions:
         # Check if questions match
         current_texts = {q["question"].strip() for q in questions}
-        expected_texts = {q["question"].strip() for q in questions_override}
+        expected_texts = {q["question"].strip() for q in expected_questions}
         if current_texts != expected_texts:
             logger.warning("Exam %s: questions changed, resetting", url)
-            questions_override = None  # Fall through to use new questions
+            expected_questions = None
 
-    if questions_override:
-        questions = questions_override
+    # Map answers from expected indices to new page's indices by question text
+    if expected_questions:
+        # Build text→answer mapping from expected
+        text_to_answer = {}
+        for q in expected_questions:
+            idx = q["index"]
+            if idx in answers:
+                text_to_answer[q["question"].strip()] = answers[idx]
+        # Remap to new questions' indices
+        mapped_answers: dict[int, str] = {}
+        for q in questions:
+            q_text = q["question"].strip()
+            if q_text in text_to_answer:
+                mapped_answers[q["index"]] = text_to_answer[q_text]
+        answers = mapped_answers
 
     logger.info("Exam %s: attempt %d, %d questions, method=%s", url, attempt_num, len(questions), method)
 
