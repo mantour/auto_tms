@@ -88,38 +88,35 @@ async def handle_survey(context: BrowserContext, url: str) -> bool:
             logger.warning("Survey %s: no submit button found", url)
             return False
 
-        url_before = page.url
         await submit_btn.first.click()
         await page.wait_for_timeout(3000)
 
-        # Verify: check if navigated away or shows completion
-        url_after = page.url
-        if url_after != url_before:
-            logger.info("Survey %s: submitted (navigated to %s)", url, url_after[:80])
-            return True
-
-        # Still on same page — check for success indicators or remaining questions
-        body_text = await page.evaluate("() => document.body.innerText")
-        if "已完成" in body_text or "感謝" in body_text:
-            logger.info("Survey %s: submitted (completion message found)", url)
-            return True
-
-        # Check if there's a confirm dialog (bootbox uses "OK", others use 確定/送出)
+        # Check for confirm dialog first (bootbox "OK", or 送出/確定)
         confirm_btn = page.locator(
             '.modal button:has-text("OK"), '
             '.bootbox button:has-text("OK"), '
             '.modal button:has-text("送出"), '
-            'button:has-text("確定"), '
-            'button:has-text("確認")'
+            '.modal button:has-text("確定")'
         )
         if await confirm_btn.count() > 0 and await confirm_btn.first.is_visible():
             await confirm_btn.first.click()
+            logger.debug("Survey %s: clicked confirm dialog", url)
             await page.wait_for_timeout(5000)
-            logger.info("Survey %s: submitted (confirmed dialog)", url)
+
+        # Verify: URL should navigate to /poll/userFinish/ on success
+        url_after = page.url
+        if "userFinish" in url_after:
+            logger.info("Survey %s: submitted (navigated to %s)", url, url_after[:80])
             return True
 
-        logger.warning("Survey %s: submit clicked but unclear if successful", url)
-        return True  # Optimistic — we filled and clicked submit
+        # Fallback checks
+        body_text = await page.evaluate("() => document.body.innerText")
+        if "檢視填寫的內容" in body_text:
+            logger.info("Survey %s: submitted (檢視填寫的內容 found)", url)
+            return True
+
+        logger.warning("Survey %s: submit clicked but verification failed (url=%s)", url, url_after[:60])
+        return False
 
     except Exception:
         logger.error("Survey %s: failed", url, exc_info=True)
