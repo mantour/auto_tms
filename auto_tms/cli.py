@@ -405,7 +405,20 @@ def _display_progress(courses: dict, show_all: bool = False) -> None:
 
         if visible:
             title = cp.title or cid
-            mat_info = f"[{done_materials}/{total_materials}]" if total_materials else ""
+            # Group by material type: [video:1/2 survey:0/1 exam:0/1]
+            if total_materials:
+                type_counts: dict[str, list[int]] = {}
+                for m in cp.materials:
+                    t = m.material_type.value
+                    type_counts.setdefault(t, [0, 0])
+                    type_counts[t][1] += 1
+                    if m.status == Status.DONE:
+                        type_counts[t][0] += 1
+                mat_info = "[" + " ".join(
+                    f"{t}:{d}/{n}" for t, (d, n) in type_counts.items()
+                ) + "]"
+            else:
+                mat_info = ""
             display_rows.append(f"  {icon} {cid}  {title:<40s} {label:<14s} {mat_info}")
 
     # Summary line
