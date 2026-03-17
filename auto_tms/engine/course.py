@@ -85,10 +85,18 @@ async def parse_course_materials(page: Page, course_id: str) -> list[dict]:
                 // Get the full text for classification
                 const fullText = node.textContent || '';
 
+                // Extract completion status from ext-col elements
+                const cols = node.querySelectorAll('.ext-col');
+                const colTexts = Array.from(cols).map(c => c.textContent.trim());
+                const completed = cols.length >= 4 &&
+                    cols[3].querySelector('.item-pass') !== null;
+
                 results.push({
                     index: i,
                     links: links,
                     fullText: fullText.substring(0, 500),
+                    colTexts: colTexts,
+                    completed: completed,
                 });
             });
             return results;
@@ -103,24 +111,38 @@ async def parse_course_materials(page: Page, course_id: str) -> list[dict]:
 
     logger.info("Course %s: found %d materials", course_id, len(materials))
     for m in materials:
+        web = "PASS" if m.get("completed") else f"rec={m.get('recorded_minutes', 0)}m"
         logger.debug(
-            "  %s: %s (%s) req=%s",
+            "  %s: %s (%s) req=%s [%s]",
             m["type"].value,
             m["title"],
             m["url"],
             m.get("required_minutes"),
+            web,
         )
     return materials
 
 
 def _classify_node(node: dict, course_id: str) -> dict | None:
-    """Classify an xtree-node into a material type."""
+    """Classify an xtree-node into a material type.
+
+    Also extracts web completion status from ext-col:
+    - completed: True if col[3] has .item-pass
+    - recorded_minutes: parsed from col[2] time string (HH:MM:SS)
+    """
     text = node.get("fullText", "")
     links = node.get("links", [])
     index = node.get("index", 0)
+    completed = node.get("completed", False)
+    col_texts = node.get("colTexts", [])
 
     if not links:
         return None
+
+    # Parse recorded time from col[2] (e.g. "01:27:14" or "00:00")
+    recorded_minutes = 0
+    if len(col_texts) >= 3:
+        recorded_minutes = _parse_time_to_minutes(col_texts[2])
 
     # Find the main content link (not the mobile extension link)
     content_link = None
@@ -144,6 +166,9 @@ def _classify_node(node: dict, course_id: str) -> dict | None:
     if title_match:
         title = title_match.group(1).strip() or title
 
+    # Common fields for all types
+    web_status = {"completed": completed, "recorded_minutes": recorded_minutes}
+
     # Classify by pass condition and URL
     if "測驗" in text or "及格" in text or "/quiz/" in href or "/exam/" in href:
         media_id = _extract_id_from_url(href)
@@ -153,6 +178,7 @@ def _classify_node(node: dict, course_id: str) -> dict | None:
             "title": title or "測驗",
             "url": href,
             "required_minutes": None,
+            **web_status,
         }
 
     if "問卷" in text or "須填寫" in text or "/poll/" in href:
@@ -163,6 +189,7 @@ def _classify_node(node: dict, course_id: str) -> dict | None:
             "title": title or "問卷",
             "url": href,
             "required_minutes": None,
+            **web_status,
         }
 
     if "閱讀達" in text and "分鐘" in text:
@@ -175,6 +202,7 @@ def _classify_node(node: dict, course_id: str) -> dict | None:
             "title": title,
             "url": href,
             "required_minutes": minutes,
+            **web_status,
         }
 
     if "閱讀" in text and "次" in text:
@@ -186,6 +214,7 @@ def _classify_node(node: dict, course_id: str) -> dict | None:
             "title": title,
             "url": href,
             "required_minutes": None,
+            **web_status,
         }
 
     # Default: if URL has /media/, treat as video without time requirement
@@ -197,6 +226,7 @@ def _classify_node(node: dict, course_id: str) -> dict | None:
             "title": title,
             "url": href,
             "required_minutes": None,
+            **web_status,
         }
 
     return None
@@ -210,6 +240,24 @@ def _extract_id_from_url(url: str) -> str:
         if clean.isdigit():
             return clean
     return ""
+
+
+def _parse_time_to_minutes(text: str) -> int:
+    """Parse time string like '01:27:14' or '00:30' to total minutes."""
+    text = text.strip()
+    if not text or text == "-":
+        return 0
+    # HH:MM:SS
+    match = re.match(r"(\d+):(\d+):(\d+)", text)
+    if match:
+        h, m, s = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        return h * 60 + m + (1 if s > 0 else 0)
+    # MM:SS
+    match = re.match(r"(\d+):(\d+)", text)
+    if match:
+        m, s = int(match.group(1)), int(match.group(2))
+        return m + (1 if s > 0 else 0)
+    return 0
 
 
 def _extract_required_minutes(text: str) -> int | None:
@@ -265,13 +313,41 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
                     MaterialProgress(
                         material_id=m["id"],
                         material_type=m["type"],
-                        status=Status.PENDING,
+                        status=Status.DONE if m.get("completed") else Status.PENDING,
                         required_minutes=m.get("required_minutes"),
+                        recorded_minutes=m.get("recorded_minutes", 0),
                         url=m["url"],
                         title=m.get("title", ""),
                     )
                     for m in raw_materials
                 ]
+            else:
+                # Update existing materials with latest web status
+                web_by_id = {m["id"]: m for m in raw_materials}
+                for mat in course_prog.materials:
+                    web = web_by_id.get(mat.material_id)
+                    if web:
+                        mat.recorded_minutes = web.get("recorded_minutes", 0)
+                        if web.get("completed") and mat.status != Status.DONE:
+                            logger.info("  %s: web says PASS, marking done", mat.material_id)
+                            mat.status = Status.DONE
+
+            # Also mark done if recorded >= required (pass icon may lag)
+            for mat in course_prog.materials:
+                if (
+                    mat.status != Status.DONE
+                    and mat.material_type == MaterialType.VIDEO
+                    and mat.required_minutes
+                    and mat.recorded_minutes >= mat.required_minutes
+                ):
+                    logger.info("  %s: recorded %dm >= required %dm, marking done",
+                                mat.material_id, mat.recorded_minutes, mat.required_minutes)
+                    mat.status = Status.DONE
+
+            skipped = sum(1 for m in course_prog.materials if m.status == Status.DONE)
+            if skipped:
+                logger.info("Course %s: %d/%d materials already done on web",
+                            course_id, skipped, len(course_prog.materials))
             course_prog.status = CourseStatus.IN_PROGRESS
             save_course_progress(course_id, course_prog)
 
@@ -341,7 +417,9 @@ async def _handle_material(context: BrowserContext, mat) -> bool:
             )
             try:
                 if mat.material_type == MaterialType.VIDEO:
-                    result = await handle_video(context, mat.url, mat.required_minutes)
+                    result = await handle_video(
+                        context, mat.url, mat.required_minutes, mat.recorded_minutes
+                    )
                 elif mat.material_type == MaterialType.DOCUMENT:
                     result = await handle_document(context, mat.url)
                 elif mat.material_type == MaterialType.SURVEY:

@@ -32,6 +32,7 @@ class MaterialProgress(BaseModel):
     material_type: MaterialType
     status: Status = Status.PENDING
     required_minutes: int | None = None
+    recorded_minutes: int = 0
     url: str
     title: str = ""
 

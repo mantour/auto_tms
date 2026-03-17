@@ -15,16 +15,20 @@ NETWORK_LOG_DIR = DATA_DIR / "network_logs"
 
 
 async def handle_video(
-    context: BrowserContext, url: str, required_minutes: int | None
+    context: BrowserContext,
+    url: str,
+    required_minutes: int | None,
+    recorded_minutes: int = 0,
 ) -> bool:
     """Play a video in headless browser and wait for the required duration.
 
-    Logs all network requests for future optimization (Approach C Phase 1).
+    If recorded_minutes is provided, only plays the remaining difference.
 
     Args:
         context: Playwright browser context.
         url: Video page URL (e.g., /media/273090).
         required_minutes: Minimum playback minutes needed, or None.
+        recorded_minutes: Minutes already recorded on the web.
 
     Returns:
         True if playback duration was satisfied.
@@ -32,9 +36,19 @@ async def handle_video(
     if required_minutes is None:
         required_minutes = 1  # Default: just open it briefly
 
-    wait_ms = required_minutes * 60 * 1000 + 30_000  # Add 30s buffer
+    effective_minutes = max(0, required_minutes - recorded_minutes)
+    if effective_minutes <= 0:
+        logger.info("Video %s: already recorded %dm >= required %dm, skipping",
+                     url, recorded_minutes, required_minutes)
+        return True
 
-    logger.info("Video %s: need %d min, waiting %d ms", url, required_minutes, wait_ms)
+    wait_ms = effective_minutes * 60 * 1000 + 30_000  # Add 30s buffer
+
+    if recorded_minutes > 0:
+        logger.info("Video %s: need %d min, recorded %dm, playing %dm (+30s buffer)",
+                     url, required_minutes, recorded_minutes, effective_minutes)
+    else:
+        logger.info("Video %s: need %d min, waiting %d ms", url, required_minutes, wait_ms)
 
     page = await context.new_page()
     network_requests: list[dict] = []
