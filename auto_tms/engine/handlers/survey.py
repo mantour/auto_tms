@@ -68,14 +68,16 @@ async def handle_survey(context: BrowserContext, url: str) -> bool:
             if await first_radio.count() > 0:
                 await first_radio.click(force=True)
 
-        # Fill visible text areas and contenteditable editors with「無」
+        # Fill visible text areas with「無」
         textareas = page.locator("textarea:visible")
         for i in range(await textareas.count()):
             await textareas.nth(i).fill("無")
 
-        editors = page.locator(".note-editable[contenteditable]:visible")
-        for i in range(await editors.count()):
-            await editors.nth(i).fill("無")
+        # Fill rich text editor (iframe-based RTE) with「無」
+        rte_body = page.frame_locator(".richtexteditor iframe").locator("body")
+        if await rte_body.count() > 0:
+            await rte_body.fill("無")
+            logger.debug("Survey %s: filled RTE iframe", url)
 
         # Step 4: Submit
         submit_btn = page.locator(
@@ -102,11 +104,17 @@ async def handle_survey(context: BrowserContext, url: str) -> bool:
             logger.info("Survey %s: submitted (completion message found)", url)
             return True
 
-        # Check if there's a confirm dialog
-        confirm_btn = page.locator('button:has-text("確定"), button:has-text("確認")')
-        if await confirm_btn.count() > 0:
+        # Check if there's a confirm dialog (bootbox uses "OK", others use 確定/送出)
+        confirm_btn = page.locator(
+            '.modal button:has-text("OK"), '
+            '.bootbox button:has-text("OK"), '
+            '.modal button:has-text("送出"), '
+            'button:has-text("確定"), '
+            'button:has-text("確認")'
+        )
+        if await confirm_btn.count() > 0 and await confirm_btn.first.is_visible():
             await confirm_btn.first.click()
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(5000)
             logger.info("Survey %s: submitted (confirmed dialog)", url)
             return True
 

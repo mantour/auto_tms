@@ -164,11 +164,18 @@ async def handle_exam(
             else:
                 logger.warning("Exam %s: no submit button found", url)
 
+            # Build attempt_answers for harvest (keyed by question text)
+            attempt_answers = {}
+            for q in questions:
+                q_text = q["question"].strip()
+                idx = q["index"]
+                if idx in answers:
+                    attempt_answers[q_text] = answers[idx]
+
             # Harvest correct answers if shown on result page
-            harvested = await _harvest_correct_answers(page)
+            harvested = await _harvest_correct_answers(page, attempt_answers)
             if harvested:
                 memory["correct"].update(harvested)
-                logger.info("Exam %s: harvested %d correct answers", url, len(harvested))
 
             await page.close()
             page = None
@@ -177,17 +184,8 @@ async def handle_exam(
             if course_id:
                 passed = await _check_web_pass(context, course_id, exam_id)
             else:
-                # Fallback: can't check web status without course_id
-                passed = bool(harvested)  # Assume pass if we could harvest
+                passed = bool(harvested)
                 logger.warning("Exam %s: no course_id, can't verify via web", url)
-
-            # Record this attempt's answers (keyed by question text)
-            attempt_answers = {}
-            for q in questions:
-                q_text = q["question"].strip()
-                idx = q["index"]
-                if idx in answers:
-                    attempt_answers[q_text] = answers[idx]
 
             if passed:
                 logger.info("Exam %s: PASSED on attempt %d", url, attempt)
@@ -230,11 +228,13 @@ async def _check_web_pass(
             """(examId) => {
                 const nodes = document.querySelectorAll('li.xtree-node');
                 for (const node of nodes) {
-                    const link = node.querySelector('a');
-                    if (link && link.href && link.href.includes('/exam/' + examId)) {
-                        const cols = node.querySelectorAll('.ext-col');
-                        if (cols.length >= 4) {
-                            return cols[3].querySelector('.item-pass') !== null;
+                    const links = node.querySelectorAll('a');
+                    for (const link of links) {
+                        if (link.href && link.href.includes('/exam/' + examId)) {
+                            const cols = node.querySelectorAll('.ext-col');
+                            if (cols.length >= 4) {
+                                return cols[3].querySelector('.item-pass') !== null;
+                            }
                         }
                     }
                 }
@@ -532,38 +532,57 @@ async def _fill_answers(page, questions: list[dict], answers: dict[int, str]) ->
 # ---------------------------------------------------------------------------
 
 
-async def _harvest_correct_answers(page) -> dict[str, str]:
-    """Try to extract correct answers from the result/review page.
+async def _harvest_correct_answers(
+    page, attempt_answers: dict[str, str] | None = None
+) -> dict[str, str]:
+    """Extract correct answers from the result/review page.
+
+    Two sources:
+    1. Wrong questions show「正確答案: X」text → harvest X
+    2. Correct questions (no「正確答案」) → the selected answer is correct
+
+    Args:
+        page: Result page after submission.
+        attempt_answers: Dict of {question_text: selected_sn} from this attempt,
+            used to record correct answers for questions answered correctly.
 
     Returns dict of question_text -> correct choice letter (A/B/C/D).
     """
-    harvested = await page.evaluate("""
+    harvested = await page.evaluate(r"""
         () => {
             const answers = {};
-            document.querySelectorAll('.kques-item').forEach((item) => {
-                const questionText = item.querySelector('.question')?.textContent?.trim() || '';
+            document.querySelectorAll('.kques-item').forEach(item => {
+                const questionEl = item.querySelector('.question');
+                const questionText = questionEl?.textContent?.trim() || '';
                 if (!questionText) return;
 
-                // Look for correct answer markers
-                const correctEl = item.querySelector(
-                    '.option-item.correct, .option-item.right, ' +
-                    '.option-item .correct, [class*="correct"], [class*="right-answer"]'
-                );
-                if (correctEl) {
-                    const sn = correctEl.querySelector('.optionSn')?.textContent?.trim()?.replace('.', '') || '';
-                    if (sn) answers[questionText] = sn;
+                // Check for「正確答案: X」text (wrong questions)
+                const fullText = item.textContent || '';
+                const match = fullText.match(/正確答案[：:]\s*([A-D])/);
+                if (match) {
+                    answers[questionText] = match[1];
+                } else {
+                    // No 正確答案 shown — mark as correctly answered
+                    answers[questionText] = '__correct__';
                 }
-
-                // Also check for checked correct answers (green highlight etc.)
-                item.querySelectorAll('.option-item').forEach(li => {
-                    const classes = li.className || '';
-                    if (classes.includes('correct') || classes.includes('right')) {
-                        const sn = li.querySelector('.optionSn')?.textContent?.trim()?.replace('.', '') || '';
-                        if (sn) answers[questionText] = sn;
-                    }
-                });
             });
             return answers;
         }
     """)
-    return harvested if harvested else {}
+
+    if not harvested:
+        return {}
+
+    result: dict[str, str] = {}
+    for q_text, sn in harvested.items():
+        if sn == "__correct__":
+            # This question was answered correctly — use our selected answer
+            if attempt_answers and q_text in attempt_answers:
+                result[q_text] = attempt_answers[q_text]
+        else:
+            result[q_text] = sn
+
+    if result:
+        logger.info("Harvested %d correct answers from result page", len(result))
+
+    return result
