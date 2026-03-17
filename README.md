@@ -31,6 +31,8 @@ make config       # 設定帳號密碼、API key、主機位址
 | `ANTHROPIC_API_KEY` | Claude API key（CAPTCHA + 測驗） | 是 |
 | `TMS_HOST` | TMS 主機 | 是 |
 | `TMS_PROXY` | 代理伺服器，如 `socks5://127.0.0.1:1080` | 否 |
+| `TMS_MAX_PAGES` | 同時開啟頁面上限（預設 5） | 否 |
+| `TMS_MAX_VIDEOS` | 同時播放影片上限（預設 2） | 否 |
 
 ## 使用
 

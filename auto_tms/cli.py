@@ -8,9 +8,14 @@ from pathlib import Path
 
 import click
 
-from .config import DATA_DIR, SESSION_DIR, ensure_dirs, get_current_log_file, setup_logging
-
-MAX_CONCURRENT_COURSES = 10
+from .config import (
+    DATA_DIR,
+    MAX_CONCURRENT_PAGES,
+    SESSION_DIR,
+    ensure_dirs,
+    get_current_log_file,
+    setup_logging,
+)
 
 
 @click.group()
@@ -474,10 +479,10 @@ async def _complete_courses(course_ids: list[str]) -> None:
         logger.info(
             "Processing %d courses (up to %d concurrent)",
             len(pending),
-            MAX_CONCURRENT_COURSES,
+            MAX_CONCURRENT_PAGES,
         )
 
-        sem = asyncio.Semaphore(MAX_CONCURRENT_COURSES)
+        sem = asyncio.Semaphore(MAX_CONCURRENT_PAGES)
 
         async def process_one(cid: str) -> bool:
             async with sem:
@@ -574,10 +579,10 @@ async def _run_pipeline() -> None:
             logger.info(
                 "Processing %d courses concurrently (max %d)",
                 len(pending),
-                MAX_CONCURRENT_COURSES,
+                MAX_CONCURRENT_PAGES,
             )
 
-            sem = asyncio.Semaphore(MAX_CONCURRENT_COURSES)
+            sem = asyncio.Semaphore(MAX_CONCURRENT_PAGES)
 
             async def process_one(cid: str) -> bool:
                 async with sem:

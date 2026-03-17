@@ -18,6 +18,9 @@ LOG_DIR = DATA_DIR / "logs"
 
 DEFAULT_HOST = ""
 
+MAX_CONCURRENT_PAGES = int(os.getenv("TMS_MAX_PAGES", "5"))
+MAX_CONCURRENT_VIDEOS = int(os.getenv("TMS_MAX_VIDEOS", "2"))
+
 
 def load_env() -> None:
     """Load environment variables from env file (call once at startup).

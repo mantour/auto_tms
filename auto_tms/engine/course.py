@@ -6,7 +6,7 @@ import re
 
 from playwright.async_api import BrowserContext, Page
 
-from ..config import get_base_url
+from ..config import MAX_CONCURRENT_PAGES, MAX_CONCURRENT_VIDEOS, get_base_url
 from ..state.models import CourseProgress, CourseStatus, MaterialType, Status
 from ..state.store import load_course_progress, save_course_progress
 from .handlers.document import handle_document
@@ -16,9 +16,9 @@ from .handlers.video import handle_video
 
 logger = logging.getLogger("auto_tms.engine.course")
 
-# Global semaphore: max 3 concurrent page operations
-# Limited by network bandwidth through proxy tunnel
-_page_semaphore = asyncio.Semaphore(3)
+# Concurrency limits (configurable via TMS_MAX_PAGES / TMS_MAX_VIDEOS env vars)
+_page_semaphore = asyncio.Semaphore(MAX_CONCURRENT_PAGES)
+_video_semaphore = asyncio.Semaphore(MAX_CONCURRENT_VIDEOS)
 
 MAX_MATERIAL_RETRIES = 3
 
@@ -527,42 +527,51 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
 async def _handle_material(
     context: BrowserContext, mat, course_id: str | None = None
 ) -> bool:
-    """Dispatch to the appropriate material handler with semaphore and retry."""
+    """Dispatch to the appropriate material handler with semaphore and retry.
+
+    Video acquires both _video_semaphore and _page_semaphore.
+    Other types only acquire _page_semaphore.
+    """
+    is_video = mat.material_type == MaterialType.VIDEO
+
     for attempt in range(1, MAX_MATERIAL_RETRIES + 1):
-        async with _page_semaphore:
-            logger.info(
-                "Processing %s: %s (%s) [attempt %d/%d]",
+        logger.info(
+            "Processing %s: %s (%s) [attempt %d/%d]",
+            mat.material_type.value,
+            mat.title or mat.material_id,
+            mat.url,
+            attempt,
+            MAX_MATERIAL_RETRIES,
+        )
+        try:
+            if is_video:
+                async with _video_semaphore:
+                    async with _page_semaphore:
+                        result = await handle_video(
+                            context, mat.url, mat.required_minutes, mat.recorded_minutes
+                        )
+            else:
+                async with _page_semaphore:
+                    if mat.material_type == MaterialType.DOCUMENT:
+                        result = await handle_document(context, mat.url)
+                    elif mat.material_type == MaterialType.SURVEY:
+                        result = await handle_survey(context, mat.url)
+                    elif mat.material_type == MaterialType.EXAM:
+                        result = await handle_exam(context, mat.url, course_id)
+                    else:
+                        result = False
+
+            if result:
+                return True
+
+        except Exception:
+            logger.error(
+                "Failed to handle %s %s (attempt %d)",
                 mat.material_type.value,
-                mat.title or mat.material_id,
-                mat.url,
+                mat.material_id,
                 attempt,
-                MAX_MATERIAL_RETRIES,
+                exc_info=True,
             )
-            try:
-                if mat.material_type == MaterialType.VIDEO:
-                    result = await handle_video(
-                        context, mat.url, mat.required_minutes, mat.recorded_minutes
-                    )
-                elif mat.material_type == MaterialType.DOCUMENT:
-                    result = await handle_document(context, mat.url)
-                elif mat.material_type == MaterialType.SURVEY:
-                    result = await handle_survey(context, mat.url)
-                elif mat.material_type == MaterialType.EXAM:
-                    result = await handle_exam(context, mat.url, course_id)
-                else:
-                    result = False
-
-                if result:
-                    return True
-
-            except Exception:
-                logger.error(
-                    "Failed to handle %s %s (attempt %d)",
-                    mat.material_type.value,
-                    mat.material_id,
-                    attempt,
-                    exc_info=True,
-                )
 
         # Exponential backoff before retry
         if attempt < MAX_MATERIAL_RETRIES:

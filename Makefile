@@ -21,11 +21,15 @@ config: ## Configure credentials, host, and proxy
 	 read -p "ANTHROPIC_API_KEY: " apikey; \
 	 read -p "TMS_HOST: " host; \
 	 read -p "TMS_PROXY (e.g. socks5://127.0.0.1:1080) [none]: " proxy; \
+	 read -p "TMS_MAX_PAGES (concurrent pages) [5]: " max_pages; \
+	 read -p "TMS_MAX_VIDEOS (concurrent videos) [2]: " max_videos; \
 	 echo "TMS_USER=$$user" > .env; \
 	 echo "TMS_PASSWD=$$passwd" >> .env; \
 	 echo "ANTHROPIC_API_KEY=$$apikey" >> .env; \
 	 echo "TMS_HOST=$$host" >> .env; \
 	 if [ -n "$$proxy" ]; then echo "TMS_PROXY=$$proxy" >> .env; fi; \
+	 if [ -n "$$max_pages" ]; then echo "TMS_MAX_PAGES=$$max_pages" >> .env; fi; \
+	 if [ -n "$$max_videos" ]; then echo "TMS_MAX_VIDEOS=$$max_videos" >> .env; fi; \
 	 echo ""; echo "Saved to .env"
 
 run: ## Full pipeline (or: make run ID=198761)
