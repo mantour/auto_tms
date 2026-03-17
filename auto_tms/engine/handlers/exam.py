@@ -1,5 +1,6 @@
 """Exam handler — Claude API for answering, with persistent answer memory."""
 
+import itertools
 import json
 import logging
 import random
@@ -13,7 +14,8 @@ from ...config import DATA_DIR
 
 logger = logging.getLogger("auto_tms.engine.handlers.exam")
 
-MAX_EXAM_ATTEMPTS = 5
+MAX_CLAUDE_ATTEMPTS = 3
+MAX_EXAM_ATTEMPTS = 50  # Accommodate brute force
 EXAM_MEMORY_DIR = DATA_DIR / "state" / "exam_memory"
 
 
@@ -122,11 +124,24 @@ async def handle_exam(
 
             logger.info("Exam %s: found %d questions", url, len(questions))
 
-            # Step 5: Get answers (known correct + Claude for rest)
-            answers = await _get_answers(questions, memory)
-
-            # Ensure this combination is not a repeat
-            answers = _ensure_unique_combination(questions, answers, memory)
+            # Step 5: Get answers
+            claude_attempts = sum(
+                1 for a in memory.get("attempts", []) if a.get("method") != "brute"
+            )
+            if claude_attempts < MAX_CLAUDE_ATTEMPTS:
+                # Use Claude with attempt history
+                answers = await _get_answers(questions, memory)
+                answers = _ensure_unique_combination(questions, answers, memory)
+                method = "claude"
+            else:
+                # Switch to brute force
+                answers = _brute_force_answers(questions, memory)
+                if answers is None:
+                    logger.error("Exam %s: all brute force combinations exhausted", url)
+                    await page.close()
+                    break
+                method = "brute"
+                logger.info("Exam %s: using brute force (attempt %d)", url, attempt)
 
             # Step 6: Fill in answers
             await _fill_answers(page, questions, answers)
@@ -135,13 +150,16 @@ async def handle_exam(
             submit_btn = page.locator('button:has-text("交卷"), a:has-text("交卷")')
             if await submit_btn.count() > 0:
                 await submit_btn.first.click()
-                await page.wait_for_timeout(2000)
-                # Handle confirmation dialog
-                confirm_btn = page.locator(
-                    'button:has-text("確定"), button:has-text("確認")'
+                await page.wait_for_timeout(3000)
+                # Handle confirmation dialog (button text may be「交卷」or「確定」)
+                modal_confirm = page.locator(
+                    '.modal button:has-text("交卷"), '
+                    '.modal button:has-text("確定"), '
+                    '.modal button:has-text("確認")'
                 )
-                if await confirm_btn.count() > 0 and await confirm_btn.first.is_visible():
-                    await confirm_btn.first.click()
+                if await modal_confirm.count() > 0 and await modal_confirm.first.is_visible():
+                    await modal_confirm.first.click()
+                    logger.debug("Exam %s: confirmed submit dialog", url)
                 await page.wait_for_timeout(5000)
             else:
                 logger.warning("Exam %s: no submit button found", url)
@@ -178,7 +196,7 @@ async def handle_exam(
                 return True
             else:
                 logger.info("Exam %s: did not pass on attempt %d", url, attempt)
-                memory["attempts"].append({"answers": attempt_answers})
+                memory["attempts"].append({"answers": attempt_answers, "method": method})
                 _save_memory(exam_id, memory)
 
         except Exception:
@@ -272,6 +290,11 @@ async def _scrape_questions(page) -> list[dict]:
             return questions;
         }
     """)
+    # Filter out header items with no choices (e.g. "單選題 共 5 題")
+    questions = [q for q in questions if q["choices"]]
+    # Re-index after filtering
+    for i, q in enumerate(questions):
+        q["index"] = i
     return questions
 
 
@@ -299,7 +322,8 @@ async def _get_answers(
 
     if unknown:
         logger.info("Asking Claude for %d/%d questions", len(unknown), len(questions))
-        claude_answers = await _ask_claude(unknown)
+        attempts = memory.get("attempts", [])
+        claude_answers = await _ask_claude(unknown, attempts if attempts else None)
         result.update(claude_answers)
 
     # Fallback for any still missing
@@ -353,8 +377,62 @@ def _ensure_unique_combination(
     return answers
 
 
-async def _ask_claude(questions: list[dict]) -> dict[int, str]:
+def _brute_force_answers(
+    questions: list[dict], memory: dict
+) -> dict[int, str] | None:
+    """Generate the next untried answer combination via brute force.
+
+    Uses known correct answers for questions that have them, and
+    enumerates all combinations for the rest.
+
+    Returns None if all combinations have been tried.
+    """
+    correct = memory.get("correct", {})
+
+    # Separate known vs unknown questions
+    fixed: dict[int, str] = {}
+    variable: list[dict] = []
+    for q in questions:
+        q_text = q["question"].strip()
+        if q_text in correct:
+            fixed[q["index"]] = correct[q_text]
+        else:
+            variable.append(q)
+
+    if not variable:
+        # All answers are known correct — shouldn't be here
+        return {q["index"]: correct[q["question"].strip()] for q in questions}
+
+    # Build set of already-tried variable combinations
+    tried_combos: set[tuple] = set()
+    for att in memory.get("attempts", []):
+        combo = tuple(
+            att["answers"].get(q["question"].strip(), "")
+            for q in variable
+        )
+        tried_combos.add(combo)
+
+    # Generate all possible combinations for variable questions
+    choice_lists = [
+        [c["sn"] for c in q["choices"]] for q in variable
+    ]
+    for combo in itertools.product(*choice_lists):
+        if combo not in tried_combos:
+            result = dict(fixed)
+            for q, sn in zip(variable, combo):
+                result[q["index"]] = sn
+            return result
+
+    return None  # All exhausted
+
+
+async def _ask_claude(
+    questions: list[dict], attempts: list[dict] | None = None
+) -> dict[int, str]:
     """Ask Claude API to answer multiple-choice questions.
+
+    If attempts history is provided, includes it in the prompt so Claude
+    can adjust answers based on previous failures.
 
     Returns dict of question_index -> selected choice letter (A/B/C/D).
     """
@@ -365,10 +443,25 @@ async def _ask_claude(questions: list[dict]) -> dict[int, str]:
         )
         prompt_parts.append(f"Q{q['index'] + 1}: {q['question']}\n{choices_str}")
 
+    history_text = ""
+    if attempts:
+        history_lines = []
+        for i, att in enumerate(attempts, 1):
+            ans_str = ", ".join(
+                f"{q_text}: {sn}" for q_text, sn in att["answers"].items()
+            )
+            history_lines.append(f"  Attempt {i} (failed): {ans_str}")
+        history_text = (
+            "\n\nPrevious failed attempts on this exam (these answer combinations were wrong):\n"
+            + "\n".join(history_lines)
+            + "\n\nTry different answers, especially for questions where previous answers may have been wrong.\n"
+        )
+
     prompt = (
         "Answer the following multiple-choice questions from a training exam. "
         "For each question, respond with ONLY the question number and the letter, "
-        "one per line, like:\nQ1: D\nQ2: A\n\n"
+        "one per line, like:\nQ1: D\nQ2: A\n"
+        + history_text + "\n"
         + "\n\n".join(prompt_parts)
     )
 

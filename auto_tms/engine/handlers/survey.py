@@ -68,10 +68,14 @@ async def handle_survey(context: BrowserContext, url: str) -> bool:
             if await first_radio.count() > 0:
                 await first_radio.click(force=True)
 
-        # Fill visible text areas with「無」
+        # Fill visible text areas and contenteditable editors with「無」
         textareas = page.locator("textarea:visible")
         for i in range(await textareas.count()):
             await textareas.nth(i).fill("無")
+
+        editors = page.locator(".note-editable[contenteditable]:visible")
+        for i in range(await editors.count()):
+            await editors.nth(i).fill("無")
 
         # Step 4: Submit
         submit_btn = page.locator(
