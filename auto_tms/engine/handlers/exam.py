@@ -573,10 +573,16 @@ async def _harvest_correct_answers(
     if not harvested:
         return {}
 
+    # Check if this is Type A (has feedback) or Type B (no feedback)
+    has_any_feedback = any(sn != "__correct__" for sn in harvested.values())
+    if not has_any_feedback:
+        # Type B: no question shows 正確答案 → can't infer anything
+        return {}
+
     result: dict[str, str] = {}
     for q_text, sn in harvested.items():
         if sn == "__correct__":
-            # This question was answered correctly — use our selected answer
+            # Type A: no 正確答案 shown = answered correctly → use selected answer
             if attempt_answers and q_text in attempt_answers:
                 result[q_text] = attempt_answers[q_text]
         else:
