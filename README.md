@@ -29,7 +29,7 @@ make config       # 互動式設定（帳號、主機、LLM provider）
 
 | 模式 | CAPTCHA | 測驗 | 需要 |
 |------|---------|------|------|
-| **不使用 LLM**（預設） | ddddocr 離線辨識 | 隨機答案 + 分數搜尋 | `pip install ddddocr` |
+| **不使用 LLM**（預設） | ddddocr 離線辨識 | 隨機答案 + 分數搜尋 | `make setup` 已包含 |
 | Anthropic Claude | Haiku Vision | Sonnet | `ANTHROPIC_API_KEY` |
 | OpenAI | GPT-4o-mini Vision | GPT-4o-mini | `TMS_LLM_API_KEY` |
 | Google Gemini | Gemini Flash Vision | Gemini Flash | `TMS_LLM_API_KEY`（有免費額度）|
