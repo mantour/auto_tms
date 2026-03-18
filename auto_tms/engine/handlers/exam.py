@@ -1,4 +1,4 @@
-"""Exam handler — Claude API for answering, with persistent answer memory."""
+"""Exam handler — LLM for answering, with persistent answer memory."""
 
 import itertools
 import json
@@ -7,7 +7,6 @@ import random
 import re
 from pathlib import Path
 
-import anthropic
 from playwright.async_api import BrowserContext
 
 from ...config import DATA_DIR
@@ -333,17 +332,20 @@ async def handle_exam(
     best_answers: dict[int, str] = {}
     best_questions: list[dict] = []
 
-    # Phase 1: Claude attempts
+    # Phase 1: LLM/random attempts — peek at questions first, then let _do_one_attempt
+    # handle the actual page interaction with fresh DOM elements.
     for attempt in range(1, MAX_CLAUDE_ATTEMPTS + 1):
-        page, questions = await _enter_exam(context, url)
-        if not page:
+        # Peek: enter exam to see questions, then close (just for answer generation)
+        peek_page, peek_questions = await _enter_exam(context, url)
+        if not peek_page:
             continue
+        await peek_page.close()
 
-        answers = await _get_answers(questions, memory)
-        answers = _ensure_unique_combination(questions, answers, memory)
+        answers = await _get_answers(peek_questions, memory)
+        answers = _ensure_unique_combination(peek_questions, answers, memory)
 
         passed, score, questions = await _do_one_attempt(
-            context, url, None, answers, course_id, exam_id,
+            context, url, peek_questions, answers, course_id, exam_id,
             memory, "claude", attempt,
         )
 
@@ -358,11 +360,12 @@ async def handle_exam(
     # Phase 2: If Type A (has harvested correct answers), try them
     if memory.get("correct"):
         logger.info("Exam %s: trying %d harvested correct answers", url, len(memory["correct"]))
-        page, questions = await _enter_exam(context, url)
-        if page:
-            answers = await _get_answers(questions, memory)  # Uses correct from memory
+        peek_page, peek_questions = await _enter_exam(context, url)
+        if peek_page:
+            await peek_page.close()
+            answers = await _get_answers(peek_questions, memory)
             passed, score, questions = await _do_one_attempt(
-                context, url, None, answers, course_id, exam_id,
+                context, url, peek_questions, answers, course_id, exam_id,
                 memory, "harvest_retry", MAX_CLAUDE_ATTEMPTS + 1,
             )
             if passed:
@@ -373,7 +376,7 @@ async def handle_exam(
                 best_questions = questions
 
     # Phase 3: Score-based search (Type B — no harvest)
-    if best_questions and best_score > 0 and best_score < 100:
+    if best_questions and best_score < 100:
         logger.info("Exam %s: starting score search (baseline=%d)", url, best_score)
         passed = await _score_search(
             context, url, course_id, exam_id, memory,
@@ -466,12 +469,15 @@ async def _scrape_questions(page) -> list[dict]:
                 const questionText = questionEl?.textContent?.trim() || '';
 
                 const choices = [];
-                item.querySelectorAll('.option-item').forEach(li => {
+                const letters = 'ABCDEFGHIJKLMNOP';
+                item.querySelectorAll('.option-item').forEach((li, ci) => {
                     const input = li.querySelector('input');
-                    const sn = li.querySelector('.optionSn')?.textContent?.trim() || '';
+                    let sn = li.querySelector('.optionSn')?.textContent?.trim()?.replace('.', '') || '';
                     const text = li.querySelector('.option')?.textContent?.trim() || '';
+                    // Fallback: generate sn from index if missing (e.g. true/false questions)
+                    if (!sn) sn = letters[ci] || String(ci);
                     choices.push({
-                        sn: sn.replace('.', ''),
+                        sn: sn,
                         text: text,
                         value: input?.value || '',
                         name: input?.name || '',
@@ -519,10 +525,11 @@ async def _get_answers(
             unknown.append(q)
 
     if unknown:
-        logger.info("Asking Claude for %d/%d questions", len(unknown), len(questions))
+        from ...llm import ask_multiple_choice
+        logger.info("Asking LLM for %d/%d questions", len(unknown), len(questions))
         attempts = memory.get("attempts", [])
-        claude_answers = await _ask_claude(unknown, attempts if attempts else None)
-        result.update(claude_answers)
+        llm_answers = await ask_multiple_choice(unknown, attempts if attempts else None)
+        result.update(llm_answers)
 
     # Fallback for any still missing
     for q in questions:
@@ -624,65 +631,6 @@ def _brute_force_answers(
     return None  # All exhausted
 
 
-async def _ask_claude(
-    questions: list[dict], attempts: list[dict] | None = None
-) -> dict[int, str]:
-    """Ask Claude API to answer multiple-choice questions.
-
-    If attempts history is provided, includes it in the prompt so Claude
-    can adjust answers based on previous failures.
-
-    Returns dict of question_index -> selected choice letter (A/B/C/D).
-    """
-    prompt_parts = []
-    for q in questions:
-        choices_str = "\n".join(
-            f"  {c['sn']}. {c['text']}" for c in q["choices"]
-        )
-        prompt_parts.append(f"Q{q['index'] + 1}: {q['question']}\n{choices_str}")
-
-    history_text = ""
-    if attempts:
-        history_lines = []
-        for i, att in enumerate(attempts, 1):
-            ans_str = ", ".join(
-                f"{q_text}: {sn}" for q_text, sn in att["answers"].items()
-            )
-            history_lines.append(f"  Attempt {i} (failed): {ans_str}")
-        history_text = (
-            "\n\nPrevious failed attempts on this exam (these answer combinations were wrong):\n"
-            + "\n".join(history_lines)
-            + "\n\nTry different answers, especially for questions where previous answers may have been wrong.\n"
-        )
-
-    prompt = (
-        "Answer the following multiple-choice questions from a training exam. "
-        "For each question, respond with ONLY the question number and the letter, "
-        "one per line, like:\nQ1: D\nQ2: A\n"
-        + history_text + "\n"
-        + "\n\n".join(prompt_parts)
-    )
-
-    client = anthropic.AsyncAnthropic()
-    message = await client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    response_text = message.content[0].text
-    logger.debug("Claude response: %s", response_text)
-
-    answers: dict[int, str] = {}
-    for line in response_text.strip().split("\n"):
-        line = line.strip()
-        match = re.match(r"Q(\d+)\s*:\s*([A-Da-d])", line)
-        if match:
-            idx = int(match.group(1)) - 1
-            letter = match.group(2).upper()
-            answers[idx] = letter
-
-    return answers
 
 
 # ---------------------------------------------------------------------------
