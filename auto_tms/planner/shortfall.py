@@ -61,9 +61,12 @@ def build_shortfall_plan(
 
         added_hours = 0.0
 
-        # First: add required (必修) courses
+        # First: add required (必修) courses — only enough to fill mandatory shortfall
         if mandatory_shortfall > 0:
+            mandatory_remaining = mandatory_shortfall
             for course in required_courses:
+                if mandatory_remaining <= 0:
+                    break
                 cid = course.get("course_id", "")
                 if not cid or cid in seen_course_ids:
                     continue
@@ -77,6 +80,7 @@ def build_shortfall_plan(
                 ))
                 seen_course_ids.add(cid)
                 added_hours += hours
+                mandatory_remaining -= hours
 
         # Then: add electives if total still short
         remaining = total_shortfall - added_hours

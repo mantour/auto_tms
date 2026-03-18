@@ -91,16 +91,25 @@ async def _extract_program_rows(page: Page) -> list[dict]:
     return rows
 
 
-async def _resolve_category(page: Page, category_url: str, required_hours: str) -> list[dict]:
+async def _resolve_category(
+    page: Page, category_url: str, required_hours: str, completed_hours: str,
+) -> list[dict]:
     """Follow a category link to the search page and extract available online courses.
+
+    Only returns enough courses to fill the shortfall (required - completed).
 
     Args:
         page: Playwright page to navigate.
         category_url: URL like /course/latest?category=XXX.
         required_hours: The category's required hours (from parent node col[3]).
+        completed_hours: The category's completed hours (from parent node col[4]).
 
     Returns list of course dicts compatible with the main course list.
     """
+    shortfall = parse_hours(required_hours) - parse_hours(completed_hours)
+    if shortfall <= 0:
+        return []
+
     await page.goto(category_url, wait_until="networkidle")
 
     raw_courses = await page.evaluate(r"""
@@ -109,9 +118,9 @@ async def _resolve_category(page: Page, category_url: str, required_hours: str) 
             document.querySelectorAll('table tbody tr').forEach(row => {
                 const tds = row.querySelectorAll('td');
                 if (tds.length < 6) return;
-                const link = row.querySelector('a[href*="/course/"]');
                 const courseId = tds[0]?.textContent?.trim() || '';
-                const title = link?.textContent?.trim() || tds[1]?.textContent?.trim() || '';
+                const rawTitle = tds[1]?.textContent?.trim() || '';
+                const title = rawTitle.split('\n')[0].trim();
                 const format = tds[2]?.textContent?.trim() || '';
                 const hours = tds[4]?.textContent?.trim() || '1';
                 const status = tds[tds.length - 1]?.textContent?.trim() || '';
@@ -124,28 +133,32 @@ async def _resolve_category(page: Page, category_url: str, required_hours: str) 
 
     is_required = required_hours not in ("-", "", "0")
     courses = []
+    filled = 0.0
     for c in raw_courses:
-        # Only include online courses that are not already passed
+        if filled >= shortfall:
+            break
         if c["format"] != "線上":
             continue
         if c["status"] == "已通過":
             continue
         if not c["courseId"] or not c["courseId"].isdigit():
             continue
+        hours = parse_hours(c["hours"]) or 1.0
         courses.append({
             "course_id": c["courseId"],
             "title": c["title"],
             "type": "課程",
             "format": "線上",
-            "required_hours": required_hours,
+            "required_hours": c["hours"],
             "completed_hours": "0",
             "completion": "0%",
             "is_required": is_required,
             "is_online": True,
             "is_in_person": False,
         })
+        filled += hours
 
-    logger.debug("Category %s: found %d available online courses", category_url, len(courses))
+    logger.debug("Category %s: shortfall=%.1f, selected %d courses", category_url, shortfall, len(courses))
     return courses
 
 
@@ -254,12 +267,13 @@ async def _scrape_program_detail(page: Page, program_url: str) -> dict:
     for cat in categories:
         cat_url = cat["category_url"]
         cat_required = cat.get("required_hours", "-")
+        cat_completed = cat.get("completed_hours", "0")
         cat_completion = cat.get("completion", "0%")
         if cat_completion == "100%":
             logger.debug("Program %s: category '%s' already complete", program_url, cat.get("title", ""))
             continue
         logger.info("Program %s: resolving category '%s'", program_url, cat.get("title", ""))
-        resolved = await _resolve_category(page, cat_url, cat_required)
+        resolved = await _resolve_category(page, cat_url, cat_required, cat_completed)
         courses.extend(resolved)
 
     result["courses"] = courses
