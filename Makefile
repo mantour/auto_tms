@@ -3,7 +3,7 @@ VENV := .venv
 BIN := $(VENV)/bin
 AUTO_TMS := $(BIN)/auto_tms
 
-.PHONY: setup config run status log stop reset help
+.PHONY: setup config run status status-refresh status-all log stop reset help
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  make %-14s %s\n", $$1, $$2}'
@@ -22,12 +22,14 @@ else
 	nohup $(AUTO_TMS) -v run $(if $(MODE),--mode $(MODE),) > ~/.auto_tms/logs/run_output.log 2>&1 & echo "PID: $$!"
 endif
 
-status: ## Show status (add ALL=1 for full list, CACHED=1 for offline)
-ifdef CACHED
-	$(AUTO_TMS) status --cached $(if $(ALL),--all,)
-else
-	$(AUTO_TMS) status $(if $(ALL),--all,)
-endif
+status: ## Show cached status
+	@$(AUTO_TMS) status
+
+status-refresh: ## Refresh from web and show
+	@$(AUTO_TMS) status --refresh
+
+status-all: ## Show all courses (include done)
+	@$(AUTO_TMS) status --all
 
 log: ## Tail today's log
 	@$(AUTO_TMS) log

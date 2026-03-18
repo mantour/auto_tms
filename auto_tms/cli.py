@@ -65,17 +65,17 @@ def run(ctx: click.Context, course_id: str | None, file_path: str | None, mode: 
 
 
 @cli.command()
-@click.option("--cached", is_flag=True, help="Use cached data (no network)")
-@click.option("--all", "show_all", is_flag=True, help="Show all programs and courses")
+@click.option("--refresh", is_flag=True, help="Refresh from web (default: cached)")
+@click.option("--all", "show_all", is_flag=True, help="Show done courses too")
 @click.pass_context
-def status(ctx: click.Context, cached: bool, show_all: bool) -> None:
+def status(ctx: click.Context, refresh: bool, show_all: bool) -> None:
     """Show program completion and course progress."""
     if not ctx.obj.get("verbose"):
         logging.getLogger("auto_tms").setLevel(logging.WARNING)
-    if cached:
-        _status_cached(show_all)
-    else:
+    if refresh:
         asyncio.run(_status_live(show_all))
+    else:
+        _status_cached(show_all)
 
 
 @cli.command()
@@ -115,7 +115,7 @@ def _status_cached(show_all: bool = False) -> None:
                 "total_shortfall": max(0, req.total_required - req.total_completed),
                 "mandatory_shortfall": req.mandatory_required,
             })
-        _display_programs(programs, show_all, plan.created_at)
+        _display_programs(programs, plan.created_at)
 
     if courses:
         _display_progress(courses, show_all)
@@ -150,7 +150,7 @@ async def _status_live(show_all: bool = False) -> None:
             "total_shortfall": prog.get("total_shortfall", 0),
             "mandatory_shortfall": prog.get("mandatory_shortfall", 0),
         })
-    _display_programs(status_data, show_all)
+    _display_programs(status_data)
 
     if courses:
         _display_progress(courses, show_all)
@@ -298,12 +298,9 @@ def _display_pipeline_footer(plan, run_meta) -> None:
 
 
 def _display_programs(
-    programs: list[dict], show_all: bool = False, scrape_time: datetime | None = None,
+    programs: list[dict], scrape_time: datetime | None = None,
 ) -> None:
-    """Display program completion status with progress bars.
-
-    Default: only show incomplete programs. --all: show everything.
-    """
+    """Display all program completion status with progress bars."""
     passed = sum(
         1 for p in programs
         if p.get("total_shortfall", 0) <= 0 and p.get("mandatory_shortfall", 0) <= 0
@@ -315,7 +312,6 @@ def _display_programs(
     click.echo(f"我的學程 — {passed}/{total} 通過{ts}")
     click.echo("=" * 80)
 
-    hidden = 0
     for prog in programs:
         name = prog.get("name", "")
         total_req = prog.get("total_required", 0)
@@ -323,10 +319,6 @@ def _display_programs(
         mandatory_short = prog.get("mandatory_shortfall", 0)
         total_done = total_req - total_short
         is_pass = total_short <= 0 and mandatory_short <= 0
-
-        if is_pass and not show_all:
-            hidden += 1
-            continue
 
         if is_pass:
             mark = click.style("✓ 通過", fg="green")
@@ -349,8 +341,6 @@ def _display_programs(
     click.echo("=" * 80)
     if passed == total:
         click.echo(click.style("所有學程皆已通過！", fg="green", bold=True))
-    elif hidden:
-        click.echo(f"  + {hidden} 個已通過（--all 顯示）")
     click.echo()
 
 
@@ -383,7 +373,7 @@ def _display_progress(courses: dict, show_all: bool = False) -> None:
             icon = click.style("✓", fg="green")
             label = "done"
             counts["done"] += 1
-            visible = show_all
+            visible = show_all  # Hidden by default
         elif cp.status == CourseStatus.IN_PROGRESS:
             has_failed = any(m.status == Status.SKIPPED for m in cp.materials)
             if has_failed:
@@ -397,12 +387,12 @@ def _display_progress(courses: dict, show_all: bool = False) -> None:
                 icon = click.style("◎", fg="yellow")
                 label = "in_progress"
                 counts["in_progress"] += 1
-            visible = True  # Always show active/failed
+            visible = True
         else:
             icon = click.style("·", fg="white")
             label = "pending"
             counts["pending"] += 1
-            visible = show_all
+            visible = True  # Show pending by default
 
         # Estimate remaining video minutes
         if cp.status != CourseStatus.DONE:
@@ -446,10 +436,8 @@ def _display_progress(courses: dict, show_all: bool = False) -> None:
     for row in display_rows:
         click.echo(row)
 
-    if not show_all:
-        hidden = counts["done"] + counts["pending"]
-        if hidden:
-            click.echo(f"  + {hidden} done/pending（--all 顯示）")
+    if not show_all and counts["done"]:
+        click.echo(f"  + {counts['done']} done（--all 顯示）")
 
     click.echo("-" * 80)
 
