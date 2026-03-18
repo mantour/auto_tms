@@ -1,6 +1,7 @@
 """CLI entry point for auto_tms."""
 
 import asyncio
+import logging
 import re
 import subprocess
 from datetime import datetime
@@ -69,6 +70,8 @@ def run(ctx: click.Context, course_id: str | None, file_path: str | None, mode: 
 @click.pass_context
 def status(ctx: click.Context, cached: bool, show_all: bool) -> None:
     """Show program completion and course progress."""
+    if not ctx.obj.get("verbose"):
+        logging.getLogger("auto_tms").setLevel(logging.WARNING)
     if cached:
         _status_cached(show_all)
     else:
