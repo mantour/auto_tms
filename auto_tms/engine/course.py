@@ -35,25 +35,29 @@ async def enroll_in_course(page: Page, course_id: str) -> bool:
     if "syllabus" in current_url:
         logger.info("Course %s: not enrolled, attempting signup", course_id)
 
-        # Look for signup button/link
-        signup_btn = page.locator('a[href*="signup"], button:has-text("報名"), a:has-text("報名")')
-        if await signup_btn.count() > 0:
-            await signup_btn.first.click()
-            await page.wait_for_timeout(3000)
+        try:
+            # Look for signup button/link
+            signup_btn = page.locator('a[href*="signup"], button:has-text("報名"), a:has-text("報名")')
+            if await signup_btn.count() > 0:
+                await signup_btn.first.click()
+                await page.wait_for_timeout(3000)
 
-            # Navigate back to course page to verify
-            await page.goto(
-                f"{get_base_url()}/course/{course_id}", wait_until="load"
-            )
-            if "syllabus" not in page.url:
-                logger.info("Course %s: enrolled successfully", course_id)
-                return True
+                # Navigate back to course page to verify
+                await page.goto(
+                    f"{get_base_url()}/course/{course_id}", wait_until="load"
+                )
+                if "syllabus" not in page.url:
+                    logger.info("Course %s: enrolled successfully", course_id)
+                    return True
 
-            logger.error("Course %s: enrollment failed", course_id)
+                logger.error("Course %s: enrollment failed", course_id)
+                return False
+
+            logger.error("Course %s: no signup button found", course_id)
             return False
-
-        logger.error("Course %s: no signup button found", course_id)
-        return False
+        except Exception:
+            logger.error("Course %s: enrollment exception", course_id, exc_info=True)
+            return False
 
     logger.info("Course %s: already enrolled", course_id)
     return True

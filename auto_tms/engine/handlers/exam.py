@@ -38,7 +38,7 @@ def _load_memory(exam_id: str) -> dict:
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             logger.warning("Failed to load exam memory %s", path)
-    return {"attempts": [], "correct": {}}
+    return {"attempts": [], "correct": {}, "consistent": {}}
 
 
 def _save_memory(exam_id: str, memory: dict) -> None:
@@ -257,7 +257,9 @@ async def _score_search(
             current_texts = {q["question"].strip() for q in new_questions}
             expected_texts = {q["question"].strip() for q in questions}
             if current_texts != expected_texts:
-                logger.warning("Exam %s: questions changed during score search, aborting", url)
+                logger.warning("Exam %s: questions changed during score search — question bank detected", url)
+                memory["is_question_bank"] = True
+                _save_memory(exam_id, memory)
                 return False
 
             if score > current_score:
@@ -311,13 +313,14 @@ async def _score_search(
 async def handle_exam(
     context: BrowserContext, url: str, course_id: str | None = None
 ) -> bool:
-    """Solve a multiple-choice exam using Claude API with persistent answer memory.
+    """Solve a multiple-choice exam using LLM with persistent answer memory.
 
     Strategy:
-    1. Claude attempts (up to MAX_CLAUDE_ATTEMPTS) — Type A exams harvest correct answers
-    2. If not passed and Type A: use harvested correct answers directly
-    3. If not passed and Type B: score-based per-question search
-    4. Fallback: brute force enumeration
+    1. LLM attempts (up to MAX_CLAUDE_ATTEMPTS) — harvest correct answers if shown
+    2. If Type A (has harvest): use harvested correct answers
+    3. If fixed questions and not passed: score-based per-question search
+    4. If question bank: continue LLM attempts with consistent answers
+    5. Fallback: brute force (fixed questions only)
 
     Returns True if exam passed.
     """
@@ -327,22 +330,40 @@ async def handle_exam(
 
     exam_id = _extract_exam_id(url)
     memory = _load_memory(exam_id)
+    # Ensure consistent dict exists (older memory files may not have it)
+    if "consistent" not in memory:
+        memory["consistent"] = {}
 
     best_score = 0
     best_answers: dict[int, str] = {}
     best_questions: list[dict] = []
+    is_question_bank = memory.get("is_question_bank", False)
 
-    # Phase 1: LLM/random attempts — peek at questions first, then let _do_one_attempt
-    # handle the actual page interaction with fresh DOM elements.
+    # Detect question bank from existing memory
+    if not is_question_bank:
+        unique_qs = set()
+        exam_q_count = 0
+        for att in memory.get("attempts", []):
+            q_count = len(att.get("answers", {}))
+            if q_count > exam_q_count:
+                exam_q_count = q_count
+            unique_qs.update(att.get("answers", {}).keys())
+        if exam_q_count > 0 and len(unique_qs) > exam_q_count * 1.5:
+            is_question_bank = True
+            memory["is_question_bank"] = True
+            logger.info("Exam %s: detected question bank (%d unique questions, %d per exam)",
+                        url, len(unique_qs), exam_q_count)
+
+    # Phase 1: LLM/random attempts
     for attempt in range(1, MAX_CLAUDE_ATTEMPTS + 1):
-        # Peek: enter exam to see questions, then close (just for answer generation)
         peek_page, peek_questions = await _enter_exam(context, url)
         if not peek_page:
             continue
         await peek_page.close()
 
         answers = await _get_answers(peek_questions, memory)
-        answers = _ensure_unique_combination(peek_questions, answers, memory)
+        if not is_question_bank:
+            answers = _ensure_unique_combination(peek_questions, answers, memory)
 
         passed, score, questions = await _do_one_attempt(
             context, url, peek_questions, answers, course_id, exam_id,
@@ -375,8 +396,8 @@ async def handle_exam(
                 best_answers = answers
                 best_questions = questions
 
-    # Phase 3: Score-based search (Type B — no harvest)
-    if best_questions and best_score < 100:
+    # Phase 3: Score-based search (fixed questions only, not question bank)
+    if best_questions and best_score < 100 and not is_question_bank:
         logger.info("Exam %s: starting score search (baseline=%d)", url, best_score)
         passed = await _score_search(
             context, url, course_id, exam_id, memory,
@@ -384,11 +405,30 @@ async def handle_exam(
         )
         if passed:
             return True
+        # If score search detected questions changed, mark as question bank
+        if memory.get("is_question_bank"):
+            is_question_bank = True
 
-    # Phase 4: Brute force fallback
+    # Phase 4: Question bank → continue LLM attempts with consistent answers
+    # Or fixed questions → brute force fallback
     remaining = MAX_EXAM_ATTEMPTS - len(memory.get("attempts", []))
-    if remaining > 0:
-        logger.info("Exam %s: falling back to brute force (%d attempts left)", url, remaining)
+    if remaining > 0 and is_question_bank:
+        logger.info("Exam %s: question bank mode, continuing with consistent answers (%d left)",
+                     url, remaining)
+        for _ in range(remaining):
+            peek_page, peek_questions = await _enter_exam(context, url)
+            if not peek_page:
+                continue
+            await peek_page.close()
+            answers = await _get_answers(peek_questions, memory)
+            passed, score, _ = await _do_one_attempt(
+                context, url, peek_questions, answers, course_id, exam_id,
+                memory, "consistent", len(memory.get("attempts", [])) + 1,
+            )
+            if passed:
+                return True
+    elif remaining > 0 and not is_question_bank:
+        logger.info("Exam %s: brute force fallback (%d left)", url, remaining)
         for _ in range(remaining):
             page, questions = await _enter_exam(context, url)
             if not page:
@@ -510,8 +550,13 @@ async def _scrape_questions(page) -> list[dict]:
 async def _get_answers(
     questions: list[dict], memory: dict
 ) -> dict[int, str]:
-    """Get answers: use known correct first, then ask Claude for the rest."""
+    """Get answers with priority: correct → consistent → LLM/random.
+
+    New answers from LLM/random are stored into memory["consistent"]
+    so the same question always gets the same answer across attempts.
+    """
     correct = memory.get("correct", {})
+    consistent = memory.get("consistent", {})
 
     result: dict[int, str] = {}
     unknown: list[dict] = []
@@ -520,21 +565,34 @@ async def _get_answers(
         q_text = q["question"].strip()
         if q_text in correct:
             result[q["index"]] = correct[q_text]
-            logger.debug("Q%d: using known correct answer %s", q["index"] + 1, correct[q_text])
+            logger.debug("Q%d: using correct answer %s", q["index"] + 1, correct[q_text])
+        elif q_text in consistent:
+            result[q["index"]] = consistent[q_text]
+            logger.debug("Q%d: using consistent answer %s", q["index"] + 1, consistent[q_text])
         else:
             unknown.append(q)
 
     if unknown:
         from ...llm import ask_multiple_choice
-        logger.info("Asking LLM for %d/%d questions", len(unknown), len(questions))
+        logger.info("Asking LLM for %d/%d questions (%d from memory)",
+                     len(unknown), len(questions), len(questions) - len(unknown))
         attempts = memory.get("attempts", [])
         llm_answers = await ask_multiple_choice(unknown, attempts if attempts else None)
         result.update(llm_answers)
 
+        # Store new answers into consistent for future use
+        for q in unknown:
+            q_text = q["question"].strip()
+            idx = q["index"]
+            if idx in llm_answers:
+                consistent[q_text] = llm_answers[idx]
+
     # Fallback for any still missing
     for q in questions:
         if q["index"] not in result and q["choices"]:
-            result[q["index"]] = q["choices"][0]["sn"]
+            sn = q["choices"][0]["sn"]
+            result[q["index"]] = sn
+            consistent[q["question"].strip()] = sn
 
     return result
 

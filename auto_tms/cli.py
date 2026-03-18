@@ -563,10 +563,10 @@ async def _run_pipeline(mode: str = "all") -> None:
             all_progress = load_all_courses()
             exclude_ids = {
                 cid for cid, cp in all_progress.items()
-                if cp.status == CourseStatus.SKIPPED
+                if cp.status in (CourseStatus.SKIPPED, CourseStatus.DONE)
             }
             if exclude_ids:
-                logger.info("Excluding %d skipped courses", len(exclude_ids))
+                logger.info("Excluding %d done/skipped courses", len(exclude_ids))
 
             # Step 1: Gather course IDs from both sources
             course_ids: list[str] = []
