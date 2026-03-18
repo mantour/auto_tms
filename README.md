@@ -5,11 +5,11 @@
 ## 功能
 
 - **自動登入** — CAPTCHA 辨識（支援 LLM Vision 或 ddddocr 離線辨識）
-- **學程規劃** — 掃描「我的學程」，計算必修/選修時數缺口，產生最少修課清單
+- **智慧規劃** — 合併「待修課程」清單 + 學程時數缺口分析，統一規劃最少修課清單
 - **課程完成** — 自動處理影片、教材、問卷、測驗
 - **測驗作答** — LLM 輔助作答（可選）或純暴力法 + 分數搜尋（不需 API key）
 - **斷點續傳** — 逐項紀錄進度，中斷後從上次狀態繼續
-- **全自動流程** — plan → complete → verify，最多重試 3 輪直到所有學程通過
+- **全自動流程** — 規劃 → 完成 → 驗證，最多重試 3 輪直到所有學程通過
 
 ## 安裝
 
@@ -56,7 +56,9 @@ make config       # 互動式設定（帳號、主機、LLM provider）
 ## 使用
 
 ```bash
-make run                         # 全自動執行（背景運行）
+make run                         # 全自動（待修課程 + 學程規劃）
+make run MODE=pending            # 僅完成待修課程
+make run MODE=program            # 僅學程規劃選課
 make run ID=198761               # 完成單一課程
 make status                      # 即時狀態（scrape 網站 + 本地進度）
 make status CACHED=1             # 快取狀態（不連網）
@@ -69,7 +71,9 @@ make reset                       # 清除進度，重新開始
 也可以直接使用 CLI：
 
 ```bash
-auto_tms run                    # 全自動流程
+auto_tms run                    # 全自動（待修 + 學程）
+auto_tms run --mode pending     # 僅完成待修課程
+auto_tms run --mode program     # 僅學程規劃選課
 auto_tms run <courseId>         # 完成單一課程
 auto_tms run -f courses.txt    # 從檔案批次完成
 auto_tms status                 # 即時狀態
