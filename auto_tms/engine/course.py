@@ -39,6 +39,13 @@ async def enroll_in_course(page: Page, course_id: str) -> bool:
             # Look for signup button/link
             signup_btn = page.locator('a[href*="signup"], button:has-text("報名"), a:has-text("報名")')
             if await signup_btn.count() > 0:
+                # Check if button is disabled (e.g. role restriction)
+                is_disabled = await signup_btn.first.evaluate(
+                    "el => el.classList.contains('disabled') || el.disabled"
+                )
+                if is_disabled:
+                    logger.error("Course %s: signup button is disabled (restricted)", course_id)
+                    return False
                 await signup_btn.first.click()
                 await page.wait_for_timeout(3000)
 
