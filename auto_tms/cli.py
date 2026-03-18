@@ -537,6 +537,7 @@ async def _run_pipeline() -> None:
     from .planner.shortfall import build_shortfall_plan
     from .state.models import CourseProgress, CourseStatus, RunMeta
     from .state.store import (
+        load_all_courses,
         load_course_progress,
         load_run_meta,
         save_course_progress,
@@ -557,10 +558,19 @@ async def _run_pipeline() -> None:
         for iteration in range(1, MAX_ITERATIONS + 1):
             logger.info("=== Pipeline iteration %d/%d ===", iteration, MAX_ITERATIONS)
 
+            # Collect skipped course IDs (enroll failed) to exclude from plan
+            all_progress = load_all_courses()
+            exclude_ids = {
+                cid for cid, cp in all_progress.items()
+                if cp.status == CourseStatus.SKIPPED
+            }
+            if exclude_ids:
+                logger.info("Excluding %d skipped courses from plan", len(exclude_ids))
+
             # Always re-scrape to get latest state from website
             raw_programs = await scrape_programs(context)
             requirements = build_program_requirements(raw_programs)
-            plan = build_shortfall_plan(raw_programs, requirements)
+            plan = build_shortfall_plan(raw_programs, requirements, exclude_ids)
             save_plan(plan)
 
             if not plan.courses:

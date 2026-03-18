@@ -25,6 +25,7 @@ class CourseStatus(str, Enum):
     ENROLLED = "enrolled"
     IN_PROGRESS = "in_progress"
     DONE = "done"
+    SKIPPED = "skipped"  # Enroll failed — plan should pick alternative
 
 
 class MaterialProgress(BaseModel):

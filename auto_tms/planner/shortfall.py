@@ -11,6 +11,7 @@ logger = logging.getLogger("auto_tms.planner.shortfall")
 def build_shortfall_plan(
     programs: list[dict],
     requirements: list[ProgramRequirement],
+    exclude_ids: set[str] | None = None,
 ) -> CoursePlan:
     """Build a minimal course list to satisfy all program requirements.
 
@@ -28,7 +29,7 @@ def build_shortfall_plan(
         CoursePlan with the minimal set of courses to complete.
     """
     plan = CoursePlan(programs=requirements)
-    seen_course_ids: set[str] = set()
+    seen_course_ids: set[str] = set(exclude_ids or ())
 
     for prog, req in zip(programs, requirements):
         total_shortfall = prog.get("total_shortfall", 0.0)

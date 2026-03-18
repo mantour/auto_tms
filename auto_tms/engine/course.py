@@ -369,6 +369,9 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
     if course_prog and course_prog.status == CourseStatus.DONE:
         logger.info("Course %s: already completed, skipping", course_id)
         return True
+    if course_prog and course_prog.status == CourseStatus.SKIPPED:
+        logger.info("Course %s: previously skipped (enroll failed), skipping", course_id)
+        return False
 
     page = None
     try:
@@ -378,6 +381,11 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
 
             if not (course_prog and course_prog.enrolled):
                 if not await enroll_in_course(page, course_id):
+                    # Mark as skipped so plan can exclude and pick alternative
+                    skip_prog = course_prog or CourseProgress(course_id=course_id)
+                    skip_prog.status = CourseStatus.SKIPPED
+                    save_course_progress(course_id, skip_prog)
+                    logger.warning("Course %s: enroll failed, marked as skipped", course_id)
                     return False
 
             if not course_prog:
