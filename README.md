@@ -60,9 +60,9 @@ make run                         # 全自動（待修課程 + 學程規劃）
 make run MODE=pending            # 僅完成待修課程
 make run MODE=program            # 僅學程規劃選課
 make run ID=198761               # 完成單一課程
-make status                      # 即時狀態（scrape 網站 + 本地進度）
-make status CACHED=1             # 快取狀態（不連網）
-make status ALL=1                # 顯示全部學程與課程
+make status                      # 查看狀態（快取）
+make status-refresh              # 從網頁重新抓取並更新快取
+make status-all                  # 顯示全部課程（含已完成）
 make log                         # 查看即時 log
 make stop                        # 停止執行中的流程
 make reset                       # 清除進度，重新開始
@@ -76,9 +76,9 @@ auto_tms run --mode pending     # 僅完成待修課程
 auto_tms run --mode program     # 僅學程規劃選課
 auto_tms run <courseId>         # 完成單一課程
 auto_tms run -f courses.txt    # 從檔案批次完成
-auto_tms status                 # 即時狀態
-auto_tms status --cached        # 快取狀態
-auto_tms status --all           # 顯示全部（含已通過/已完成）
+auto_tms status                 # 查看狀態（快取）
+auto_tms status --refresh       # 從網頁重新抓取
+auto_tms status --all           # 顯示全部（含已完成課程）
 auto_tms log                    # 查看 log
 auto_tms -v <command>           # 顯示詳細 log
 ```
