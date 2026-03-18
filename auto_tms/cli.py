@@ -32,14 +32,18 @@ def cli(ctx: click.Context, verbose: bool) -> None:
 @cli.command()
 @click.argument("course_id", required=False)
 @click.option("-f", "--file", "file_path", type=click.Path(exists=True), help="Course IDs file (one per line)")
+@click.option("-m", "--mode", type=click.Choice(["all", "pending", "program"]), default="all",
+              help="Pipeline mode: all (pending+program), pending only, program only")
 @click.pass_context
-def run(ctx: click.Context, course_id: str | None, file_path: str | None) -> None:
+def run(ctx: click.Context, course_id: str | None, file_path: str | None, mode: str) -> None:
     """Run pipeline or complete specific courses.
 
     \b
-    auto_tms run                 Full pipeline (plan → complete → verify)
-    auto_tms run <courseId>       Complete one course
-    auto_tms run -f courses.txt  Complete courses from file
+    auto_tms run                      Full pipeline (pending + program)
+    auto_tms run --mode pending       Only complete pending courses
+    auto_tms run --mode program       Only run program shortfall
+    auto_tms run <courseId>            Complete one course
+    auto_tms run -f courses.txt       Complete courses from file
     """
     logger = ctx.obj["logger"]
 
@@ -55,8 +59,8 @@ def run(ctx: click.Context, course_id: str | None, file_path: str | None) -> Non
         logger.info("Completing %d courses from %s", len(course_ids), file_path)
         asyncio.run(_complete_courses(course_ids))
     else:
-        logger.info("Starting full pipeline")
-        asyncio.run(_run_pipeline())
+        logger.info("Starting pipeline (mode=%s)", mode)
+        asyncio.run(_run_pipeline(mode))
 
 
 @cli.command()
@@ -522,8 +526,13 @@ async def _complete_courses(course_ids: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _run_pipeline() -> None:
-    """Run full pipeline: plan → complete → verify, up to 3 iterations.
+async def _run_pipeline(mode: str = "all") -> None:
+    """Run pipeline: plan from pending + program sources, then complete courses.
+
+    Modes:
+        all: merge pending courses + program shortfall, then complete (default)
+        pending: only complete pending courses from notCompleteList
+        program: only run program shortfall planning
 
     Progress is preserved across iterations — completed materials (videos,
     surveys, etc.) are never re-processed.
@@ -533,6 +542,7 @@ async def _run_pipeline() -> None:
     from .auth.browser import create_browser_context
     from .auth.login import ensure_authenticated
     from .engine.course import process_course
+    from .planner.pending import scrape_pending_courses
     from .planner.scraper import build_program_requirements, scrape_programs
     from .planner.shortfall import build_shortfall_plan
     from .state.models import CourseProgress, CourseStatus, RunMeta
@@ -558,53 +568,64 @@ async def _run_pipeline() -> None:
         for iteration in range(1, MAX_ITERATIONS + 1):
             logger.info("=== Pipeline iteration %d/%d ===", iteration, MAX_ITERATIONS)
 
-            # Collect skipped course IDs (enroll failed) to exclude from plan
+            # Collect skipped course IDs (enroll failed) to exclude
             all_progress = load_all_courses()
             exclude_ids = {
                 cid for cid, cp in all_progress.items()
                 if cp.status == CourseStatus.SKIPPED
             }
             if exclude_ids:
-                logger.info("Excluding %d skipped courses from plan", len(exclude_ids))
+                logger.info("Excluding %d skipped courses", len(exclude_ids))
 
-            # Always re-scrape to get latest state from website
-            raw_programs = await scrape_programs(context)
-            requirements = build_program_requirements(raw_programs)
-            plan = build_shortfall_plan(raw_programs, requirements, exclude_ids)
-            save_plan(plan)
+            # Step 1: Gather course IDs from both sources
+            course_ids: list[str] = []
+            seen: set[str] = set(exclude_ids)
 
-            if not plan.courses:
-                logger.info("All programs complete!")
+            # Source A: Pending courses (notCompleteList)
+            if mode in ("all", "pending"):
+                pending = await scrape_pending_courses(context)
+                for c in pending:
+                    cid = c["course_id"]
+                    if cid not in seen:
+                        course_ids.append(cid)
+                        seen.add(cid)
+                logger.info("Pending: %d courses", len(pending))
+
+            # Source B: Program shortfall
+            if mode in ("all", "program"):
+                raw_programs = await scrape_programs(context)
+                requirements = build_program_requirements(raw_programs)
+                plan = build_shortfall_plan(raw_programs, requirements, seen)
+                save_plan(plan)
+                for c in plan.courses:
+                    if c.course_id not in seen:
+                        course_ids.append(c.course_id)
+                        seen.add(c.course_id)
+                logger.info("Program shortfall: %d courses", len(plan.courses))
+
+            if not course_ids:
+                logger.info("All complete!")
                 return
 
-            logger.info("Iteration %d: %d courses to complete", iteration, len(plan.courses))
+            # Step 2: Filter out already-done courses
+            pending_ids = []
+            for cid in course_ids:
+                cp = load_course_progress(cid)
+                if cp and cp.status == CourseStatus.DONE:
+                    continue
+                if not cp:
+                    save_course_progress(cid, CourseProgress(course_id=cid))
+                pending_ids.append(cid)
 
+            if not pending_ids:
+                logger.info("All courses already done, verifying...")
+                continue
+
+            logger.info("Iteration %d: %d courses to complete", iteration, len(pending_ids))
             run_meta.iteration = iteration
             save_run_meta(run_meta)
 
-            # Check each course, create progress file if needed
-            pending = []
-            for planned in plan.courses:
-                cid = planned.course_id
-                cp = load_course_progress(cid)
-                if not cp:
-                    cp = CourseProgress(course_id=cid, title=planned.title)
-                    save_course_progress(cid, cp)
-                if cp.status == CourseStatus.DONE:
-                    logger.info("Course %s: already done", cid)
-                    continue
-                pending.append(cid)
-
-            if not pending:
-                logger.info("All planned courses already done, verifying...")
-                continue
-
-            logger.info(
-                "Processing %d courses concurrently (max %d)",
-                len(pending),
-                MAX_CONCURRENT_PAGES,
-            )
-
+            # Step 3: Complete all courses concurrently
             sem = asyncio.Semaphore(MAX_CONCURRENT_PAGES)
 
             async def process_one(cid: str) -> bool:
@@ -617,7 +638,7 @@ async def _run_pipeline() -> None:
                         return False
 
             results = await asyncio.gather(
-                *(process_one(cid) for cid in pending),
+                *(process_one(cid) for cid in pending_ids),
                 return_exceptions=True,
             )
 
