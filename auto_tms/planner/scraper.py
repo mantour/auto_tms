@@ -91,6 +91,64 @@ async def _extract_program_rows(page: Page) -> list[dict]:
     return rows
 
 
+async def _resolve_category(page: Page, category_url: str, required_hours: str) -> list[dict]:
+    """Follow a category link to the search page and extract available online courses.
+
+    Args:
+        page: Playwright page to navigate.
+        category_url: URL like /course/latest?category=XXX.
+        required_hours: The category's required hours (from parent node col[3]).
+
+    Returns list of course dicts compatible with the main course list.
+    """
+    await page.goto(category_url, wait_until="networkidle")
+
+    raw_courses = await page.evaluate(r"""
+        () => {
+            const results = [];
+            document.querySelectorAll('table tbody tr').forEach(row => {
+                const tds = row.querySelectorAll('td');
+                if (tds.length < 6) return;
+                const link = row.querySelector('a[href*="/course/"]');
+                const courseId = tds[0]?.textContent?.trim() || '';
+                const title = link?.textContent?.trim() || tds[1]?.textContent?.trim() || '';
+                const format = tds[2]?.textContent?.trim() || '';
+                const hours = tds[4]?.textContent?.trim() || '1';
+                const status = tds[tds.length - 1]?.textContent?.trim() || '';
+
+                results.push({ courseId, title, format, hours, status });
+            });
+            return results;
+        }
+    """)
+
+    is_required = required_hours not in ("-", "", "0")
+    courses = []
+    for c in raw_courses:
+        # Only include online courses that are not already passed
+        if c["format"] != "線上":
+            continue
+        if c["status"] == "已通過":
+            continue
+        if not c["courseId"] or not c["courseId"].isdigit():
+            continue
+        courses.append({
+            "course_id": c["courseId"],
+            "title": c["title"],
+            "type": "課程",
+            "format": "線上",
+            "required_hours": required_hours,
+            "completed_hours": "0",
+            "completion": "0%",
+            "is_required": is_required,
+            "is_online": True,
+            "is_in_person": False,
+        })
+
+    logger.debug("Category %s: found %d available online courses", category_url, len(courses))
+    return courses
+
+
 async def _scrape_program_detail(page: Page, program_url: str) -> dict:
     """Scrape a program detail page for hour requirements and course list.
 
@@ -136,8 +194,8 @@ async def _scrape_program_detail(page: Page, program_url: str) -> dict:
     result["total_shortfall"] = parse_hours(reports.get("總稽核值不足", "0"))
     result["mandatory_shortfall"] = parse_hours(reports.get("必修不足", "0"))
 
-    # Extract courses from xtree-node elements
-    courses = await page.evaluate(r"""
+    # Extract courses and category nodes from xtree-node elements
+    nodes = await page.evaluate(r"""
         () => {
             const results = [];
             document.querySelectorAll('li.xtree-node').forEach(node => {
@@ -158,6 +216,13 @@ async def _scrape_program_detail(page: Page, program_url: str) -> dict:
                 const dataUrl = link?.getAttribute('data-url') || '';
                 const urlCourseId = dataUrl.match(/courseId=(\d+)/)?.[1] || courseId;
 
+                // For category nodes, get the category link URL
+                let categoryUrl = '';
+                if (type === '課程類別') {
+                    const catLink = node.querySelector('a[href*="category="]');
+                    if (catLink) categoryUrl = catLink.href;
+                }
+
                 results.push({
                     course_id: urlCourseId,
                     title: title,
@@ -169,11 +234,33 @@ async def _scrape_program_detail(page: Page, program_url: str) -> dict:
                     is_required: requiredHours !== '-' && requiredHours !== '',
                     is_online: format === '線上',
                     is_in_person: format === '面授',
+                    category_url: categoryUrl,
                 });
             });
             return results;
         }
     """)
+
+    # Separate courses and categories
+    courses = []
+    categories = []
+    for node in nodes:
+        if node.get("type") == "課程類別" and node.get("category_url"):
+            categories.append(node)
+        else:
+            courses.append(node)
+
+    # Resolve category nodes into actual courses
+    for cat in categories:
+        cat_url = cat["category_url"]
+        cat_required = cat.get("required_hours", "-")
+        cat_completion = cat.get("completion", "0%")
+        if cat_completion == "100%":
+            logger.debug("Program %s: category '%s' already complete", program_url, cat.get("title", ""))
+            continue
+        logger.info("Program %s: resolving category '%s'", program_url, cat.get("title", ""))
+        resolved = await _resolve_category(page, cat_url, cat_required)
+        courses.extend(resolved)
 
     result["courses"] = courses
     logger.debug("Program %s: found %d courses", program_url, len(courses))
