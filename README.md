@@ -4,9 +4,10 @@
 
 ## 功能
 
-- **自動登入** — CAPTCHA 辨識（Claude Haiku Vision API）
+- **自動登入** — CAPTCHA 辨識（支援 LLM Vision 或 ddddocr 離線辨識）
 - **學程規劃** — 掃描「我的學程」，計算必修/選修時數缺口，產生最少修課清單
-- **課程完成** — 自動處理影片、教材、問卷、測驗（測驗使用 Claude API 作答）
+- **課程完成** — 自動處理影片、教材、問卷、測驗
+- **測驗作答** — LLM 輔助作答（可選）或純暴力法 + 分數搜尋（不需 API key）
 - **斷點續傳** — 逐項紀錄進度，中斷後從上次狀態繼續
 - **全自動流程** — plan → complete → verify，最多重試 3 輪直到所有學程通過
 
@@ -17,22 +18,40 @@
 ```bash
 git clone <repo-url> && cd auto_tms
 make setup        # 建立 venv、安裝套件、下載 Chromium
-make config       # 設定帳號密碼、API key、主機位址
+make config       # 互動式設定（帳號、主機、LLM provider）
 ```
 
 ## 設定
 
-`make config` 會在專案目錄產生 `.env`（已加入 `.gitignore`）：
+`make config` 會引導設定並產生 `.env`（已加入 `.gitignore`）。
+
+### LLM 模式選擇
+
+| 模式 | CAPTCHA | 測驗 | 需要 |
+|------|---------|------|------|
+| **不使用 LLM**（預設） | ddddocr 離線辨識 | 隨機答案 + 分數搜尋 | `pip install ddddocr` |
+| Anthropic Claude | Haiku Vision | Sonnet | `ANTHROPIC_API_KEY` |
+| OpenAI | GPT-4o-mini Vision | GPT-4o-mini | `TMS_LLM_API_KEY` |
+| Google Gemini | Gemini Flash Vision | Gemini Flash | `TMS_LLM_API_KEY`（有免費額度）|
+| 本地模型 | ddddocr | Ollama/vLLM 等 | `TMS_LLM_BASE_URL` |
+
+不使用 LLM 時完全不需要 API key，測驗透過逐題分數搜尋（約 5-15 次嘗試）自動通過。使用 LLM 可減少測驗嘗試次數。
+
+### 環境變數
 
 | 變數 | 說明 | 必填 |
 |------|------|------|
 | `TMS_USER` | 員工編號 | 是 |
 | `TMS_PASSWD` | 密碼 | 是 |
-| `ANTHROPIC_API_KEY` | Claude API key（CAPTCHA + 測驗） | 是 |
 | `TMS_HOST` | TMS 主機 | 是 |
 | `TMS_PROXY` | 代理伺服器，如 `socks5://127.0.0.1:1080` | 否 |
 | `TMS_MAX_PAGES` | 同時開啟頁面上限（預設 5） | 否 |
 | `TMS_MAX_VIDEOS` | 同時播放影片上限（預設 2） | 否 |
+| `TMS_LLM_PROVIDER` | `none` / `anthropic` / `openai` / `gemini` / `local`（預設 `none`）| 否 |
+| `ANTHROPIC_API_KEY` | Anthropic API key（provider=anthropic） | 否 |
+| `TMS_LLM_API_KEY` | OpenAI / Gemini API key | 否 |
+| `TMS_LLM_BASE_URL` | 本地模型 API URL（provider=local） | 否 |
+| `TMS_LLM_MODEL` | 覆蓋預設模型名稱 | 否 |
 
 ## 使用
 
@@ -42,7 +61,6 @@ make run ID=198761               # 完成單一課程
 make status                      # 即時狀態（scrape 網站 + 本地進度）
 make status CACHED=1             # 快取狀態（不連網）
 make status ALL=1                # 顯示全部學程與課程
-make status CACHED=1 ALL=1       # 快取 + 全部
 make log                         # 查看即時 log
 make stop                        # 停止執行中的流程
 make reset                       # 清除進度，重新開始
@@ -67,18 +85,19 @@ auto_tms -v <command>           # 顯示詳細 log
 
 ```
 ~/.auto_tms/
-├── session/   # Playwright 瀏覽器 session
-├── state/     # 進度追蹤 (progress.json, plan.json)
-└── logs/      # 每日 log 檔
+├── session/       # Playwright 瀏覽器 session
+├── state/         # 進度追蹤 (run.json, progress/, plan.json, exam_memory/)
+└── logs/          # log 檔
 ```
 
 ## 技術架構
 
 - **Playwright** — 無頭瀏覽器自動化
-- **Claude API** — CAPTCHA 辨識（Haiku Vision）、測驗作答（Sonnet）
+- **LLM（可選）** — CAPTCHA 辨識、測驗作答（支援 Anthropic / OpenAI / Gemini / 本地模型）
+- **ddddocr** — 離線 CAPTCHA 辨識（不使用 LLM 時）
 - **Pydantic** — 狀態模型與 JSON 持久化
 - **Click** — CLI 框架
-- **asyncio** — 並行處理多門課程（上限 10）
+- **asyncio** — 並行處理多門課程
 
 ## 作者
 
