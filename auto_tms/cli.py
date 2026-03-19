@@ -577,6 +577,7 @@ async def _run_pipeline(mode: str = "all") -> None:
 
             # Step 1: Gather course IDs from both sources
             course_ids: list[str] = []
+            title_map: dict[str, str] = {}  # cid → title
             seen: set[str] = set(exclude_ids)
 
             # Source A: Pending courses (notCompleteList)
@@ -584,6 +585,7 @@ async def _run_pipeline(mode: str = "all") -> None:
                 pending = await scrape_pending_courses(context)
                 for c in pending:
                     cid = c["course_id"]
+                    title_map[cid] = c.get("title", "")
                     if cid not in seen:
                         course_ids.append(cid)
                         seen.add(cid)
@@ -596,6 +598,7 @@ async def _run_pipeline(mode: str = "all") -> None:
                 plan = build_shortfall_plan(raw_programs, requirements, seen)
                 save_plan(plan)
                 for c in plan.courses:
+                    title_map[c.course_id] = c.title
                     if c.course_id not in seen:
                         course_ids.append(c.course_id)
                         seen.add(c.course_id)
@@ -612,7 +615,12 @@ async def _run_pipeline(mode: str = "all") -> None:
                 if cp and cp.status == CourseStatus.DONE:
                     continue
                 if not cp:
-                    save_course_progress(cid, CourseProgress(course_id=cid))
+                    save_course_progress(cid, CourseProgress(
+                        course_id=cid, title=title_map.get(cid, ""),
+                    ))
+                elif not cp.title and title_map.get(cid):
+                    cp.title = title_map[cid]
+                    save_course_progress(cid, cp)
                 pending_ids.append(cid)
 
             if not pending_ids:
