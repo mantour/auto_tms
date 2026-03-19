@@ -254,20 +254,20 @@ def _extract_id_from_url(url: str) -> str:
 
 
 def _parse_time_to_minutes(text: str) -> int:
-    """Parse time string like '01:27:14' or '00:30' to total minutes."""
+    """Parse time string like '01:27:14' or '00:30' to total minutes (floor)."""
     text = text.strip()
     if not text or text == "-":
         return 0
     # HH:MM:SS
     match = re.match(r"(\d+):(\d+):(\d+)", text)
     if match:
-        h, m, s = int(match.group(1)), int(match.group(2)), int(match.group(3))
-        return h * 60 + m + (1 if s > 0 else 0)
+        h, m, _s = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        return h * 60 + m  # Floor — don't round up seconds
     # MM:SS
     match = re.match(r"(\d+):(\d+)", text)
     if match:
-        m, s = int(match.group(1)), int(match.group(2))
-        return m + (1 if s > 0 else 0)
+        m, _s = int(match.group(1)), int(match.group(2))
+        return m
     return 0
 
 
@@ -433,18 +433,6 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
                         if web.get("completed") and mat.status != Status.DONE:
                             logger.info("  %s: web says PASS, marking done", mat.material_id)
                             mat.status = Status.DONE
-
-            # Also mark done if recorded >= required (pass icon may lag)
-            for mat in course_prog.materials:
-                if (
-                    mat.status != Status.DONE
-                    and mat.material_type == MaterialType.VIDEO
-                    and mat.required_minutes
-                    and mat.recorded_minutes >= mat.required_minutes
-                ):
-                    logger.info("  %s: recorded %dm >= required %dm, marking done",
-                                mat.material_id, mat.recorded_minutes, mat.required_minutes)
-                    mat.status = Status.DONE
 
             skipped = sum(1 for m in course_prog.materials if m.status == Status.DONE)
             if skipped:
