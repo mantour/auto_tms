@@ -68,10 +68,33 @@ async def handle_survey(context: BrowserContext, url: str) -> bool:
             if await first_radio.count() > 0:
                 await first_radio.click(force=True)
 
+        # Check first checkbox in each group
+        checkbox_groups = await page.evaluate("""
+            () => {
+                const names = new Set();
+                document.querySelectorAll('input[type="checkbox"]').forEach(c => {
+                    if (c.name && !c.name.startsWith('mobile_')) names.add(c.name);
+                });
+                return [...names];
+            }
+        """)
+        for name in checkbox_groups:
+            first_cb = page.locator(f'input[type="checkbox"][name="{name}"]').first
+            if await first_cb.count() > 0:
+                await first_cb.click(force=True)
+
         # Fill visible text areas with「無」
         textareas = page.locator("textarea:visible")
         for i in range(await textareas.count()):
             await textareas.nth(i).fill("無")
+
+        # Fill visible text inputs with「無」
+        text_inputs = page.locator("input[type=text]:visible")
+        for i in range(await text_inputs.count()):
+            inp_name = await text_inputs.nth(i).get_attribute("name") or ""
+            if "captcha" in inp_name.lower() or "search" in inp_name.lower():
+                continue
+            await text_inputs.nth(i).fill("無")
 
         # Fill rich text editor (iframe-based RTE) with「無」
         rte_body = page.frame_locator(".richtexteditor iframe").locator("body")

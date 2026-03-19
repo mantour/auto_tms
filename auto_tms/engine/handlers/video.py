@@ -42,7 +42,7 @@ async def handle_video(
                      url, recorded_minutes, required_minutes)
         return True
 
-    wait_ms = effective_minutes * 60 * 1000 + 30_000  # Add 30s buffer
+    wait_ms = effective_minutes * 60 * 1000 + 180_000  # Add 3min buffer
 
     if recorded_minutes > 0:
         logger.info("Video %s: need %d min, recorded %dm, playing %dm (+30s buffer)",
