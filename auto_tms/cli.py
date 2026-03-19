@@ -292,6 +292,13 @@ def _display_pipeline_footer(plan, run_meta) -> None:
         click.echo(click.style(f"Last error: {err_msg}", fg="red"))
 
 
+def _truncate(text: str, max_len: int = 30) -> str:
+    """Truncate text with ellipsis if too long."""
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
 # ---------------------------------------------------------------------------
 # Program completion display
 # ---------------------------------------------------------------------------
@@ -335,7 +342,7 @@ def _display_programs(
         click.echo(
             f"  {mark}  [{bar}] {total_done:.0f}/{total_req:.0f}h"
             f"  必修差:{mandatory_short:.0f}h"
-            f"  {name}"
+            f"  {_truncate(name, 35)}"
         )
 
     click.echo("=" * 80)
@@ -416,7 +423,7 @@ def _display_progress(courses: dict, show_all: bool = False) -> None:
                 ) + "]"
             else:
                 mat_info = ""
-            display_rows.append(f"  {icon} {cid}  {title:<40s} {label:<14s} {mat_info}")
+            display_rows.append(f"  {icon} {cid}  {_truncate(title, 35):<35s} {label:<14s} {mat_info}")
 
     # Summary line
     parts = []

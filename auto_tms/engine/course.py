@@ -405,6 +405,14 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
                 )
             else:
                 course_prog.enrolled = True
+
+            # Grab course title from page if not already set
+            if not course_prog.title:
+                course_prog.title = await page.evaluate(
+                    "() => (document.querySelector('h1, .course-title, .title')"
+                    "?.textContent?.trim() || document.title.split('|')[0].trim())"
+                ) or ""
+
             save_course_progress(course_id, course_prog)
 
             raw_materials = await parse_course_materials(page, course_id)
