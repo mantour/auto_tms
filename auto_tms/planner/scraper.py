@@ -11,8 +11,14 @@ from ..state.models import ProgramRequirement
 logger = logging.getLogger("auto_tms.planner.scraper")
 
 
-async def scrape_programs(context: BrowserContext) -> list[dict]:
+async def scrape_programs(
+    context: BrowserContext, exclude_ids: set[str] | None = None,
+) -> list[dict]:
     """Scrape all programs from 我的學程, handling pagination.
+
+    Args:
+        context: Playwright browser context.
+        exclude_ids: Course IDs to skip when resolving categories (already done/skipped).
 
     Returns list of dicts with program info and sub-program course lists.
     """
@@ -55,7 +61,7 @@ async def scrape_programs(context: BrowserContext) -> list[dict]:
 
         # For each program, scrape its detail page for hours + course list
         for prog in programs:
-            detail = await _scrape_program_detail(page, prog["url"])
+            detail = await _scrape_program_detail(page, prog["url"], exclude_ids)
             prog.update(detail)
 
         return programs
@@ -93,16 +99,19 @@ async def _extract_program_rows(page: Page) -> list[dict]:
 
 async def _resolve_category(
     page: Page, category_url: str, required_hours: str, completed_hours: str,
+    exclude_ids: set[str] | None = None,
 ) -> list[dict]:
     """Follow a category link to the search page and extract available online courses.
 
     Only returns enough courses to fill the shortfall (required - completed).
+    Skips courses in exclude_ids (already done/skipped).
 
     Args:
         page: Playwright page to navigate.
         category_url: URL like /course/latest?category=XXX.
         required_hours: The category's required hours (from parent node col[3]).
         completed_hours: The category's completed hours (from parent node col[4]).
+        exclude_ids: Course IDs to skip (already done/skipped).
 
     Returns list of course dicts compatible with the main course list.
     """
@@ -132,6 +141,7 @@ async def _resolve_category(
     """)
 
     is_required = required_hours not in ("-", "", "0")
+    _exclude = exclude_ids or set()
     courses = []
     filled = 0.0
     for c in raw_courses:
@@ -142,6 +152,8 @@ async def _resolve_category(
         if c["status"] == "已通過":
             continue
         if not c["courseId"] or not c["courseId"].isdigit():
+            continue
+        if c["courseId"] in _exclude:
             continue
         hours = parse_hours(c["hours"]) or 1.0
         courses.append({
@@ -162,7 +174,9 @@ async def _resolve_category(
     return courses
 
 
-async def _scrape_program_detail(page: Page, program_url: str) -> dict:
+async def _scrape_program_detail(
+    page: Page, program_url: str, exclude_ids: set[str] | None = None,
+) -> dict:
     """Scrape a program detail page for hour requirements and course list.
 
     Returns dict with keys: total_required, total_shortfall, mandatory_shortfall, courses.
@@ -273,7 +287,7 @@ async def _scrape_program_detail(page: Page, program_url: str) -> dict:
             logger.debug("Program %s: category '%s' already complete", program_url, cat.get("title", ""))
             continue
         logger.info("Program %s: resolving category '%s'", program_url, cat.get("title", ""))
-        resolved = await _resolve_category(page, cat_url, cat_required, cat_completed)
+        resolved = await _resolve_category(page, cat_url, cat_required, cat_completed, exclude_ids)
         courses.extend(resolved)
 
     result["courses"] = courses

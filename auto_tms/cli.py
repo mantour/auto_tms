@@ -584,7 +584,7 @@ async def _run_pipeline(mode: str = "all") -> None:
 
             # Source B: Program shortfall
             if mode in ("all", "program"):
-                raw_programs = await scrape_programs(context)
+                raw_programs = await scrape_programs(context, exclude_ids)
                 requirements = build_program_requirements(raw_programs)
                 plan = build_shortfall_plan(raw_programs, requirements, seen)
                 save_plan(plan)
