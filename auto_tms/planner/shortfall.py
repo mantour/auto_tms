@@ -57,8 +57,14 @@ def build_shortfall_plan(
             if c.get("is_online") and c.get("completion") != "100%"
         ]
 
-        required_courses = [c for c in online_courses if c.get("is_required")]
-        elective_courses = [c for c in online_courses if not c.get("is_required")]
+        required_courses = sorted(
+            [c for c in online_courses if c.get("is_required")],
+            key=lambda c: c.get("course_id", ""), reverse=True,
+        )
+        elective_courses = sorted(
+            [c for c in online_courses if not c.get("is_required")],
+            key=lambda c: c.get("course_id", ""), reverse=True,
+        )
 
         added_hours = 0.0
 
