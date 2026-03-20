@@ -10,11 +10,16 @@ authors = [{name = "Yen-Ju Chu", email = "mantour.tw@gmail.com"}]
 requires-python = ">=3.11"
 dependencies = [
     "playwright>=1.40",
-    "anthropic>=0.40",
     "click>=8.1",
     "pydantic>=2.5",
     "python-dotenv>=1.0",
 ]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+openai = ["openai>=1.0"]
+ocr = ["ddddocr"]
+all = ["anthropic>=0.40", "openai>=1.0", "ddddocr"]
 
 [project.scripts]
 auto_tms = "auto_tms.cli:cli"
