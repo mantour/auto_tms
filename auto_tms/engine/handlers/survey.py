@@ -96,11 +96,13 @@ async def handle_survey(context: BrowserContext, url: str) -> bool:
                 continue
             await text_inputs.nth(i).fill("無")
 
-        # Fill rich text editor (iframe-based RTE) with「無」
-        rte_body = page.frame_locator(".richtexteditor iframe").locator("body")
-        if await rte_body.count() > 0:
-            await rte_body.fill("無")
-            logger.debug("Survey %s: filled RTE iframe", url)
+        # Fill rich text editors (iframe-based RTE) with「無」
+        rte_count = await page.locator(".richtexteditor iframe").count()
+        for i in range(rte_count):
+            body = page.frame_locator(f".richtexteditor iframe >> nth={i}").locator("body")
+            await body.fill("無")
+        if rte_count:
+            logger.debug("Survey %s: filled %d RTE iframe(s)", url, rte_count)
 
         # Step 4: Submit
         submit_btn = page.locator(
