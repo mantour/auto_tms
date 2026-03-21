@@ -16,7 +16,7 @@
 需要 Python 3.11+ 和 [uv](https://github.com/astral-sh/uv)。
 
 ```bash
-git clone <repo-url> && cd auto_tms
+git clone https://github.com/mantour/auto_tms.git && cd auto_tms
 make setup        # 建立 venv、安裝套件、下載 Chromium
 make config       # 互動式設定（帳號、主機、LLM provider）
 ```
