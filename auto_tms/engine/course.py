@@ -70,7 +70,9 @@ async def enroll_in_course(page: Page, course_id: str) -> bool:
     return True
 
 
-async def parse_course_materials(page: Page, course_id: str) -> list[dict]:
+async def parse_course_materials(
+    page: Page, course_id: str
+) -> tuple[list[dict], bool]:
     """Scrape course page for material list from xtree-node elements.
 
     Each xtree-node contains links and text describing:
@@ -79,7 +81,8 @@ async def parse_course_materials(page: Page, course_id: str) -> list[dict]:
     - Exams: link to quiz/exam URL, "測驗" or "N 分及格"
     - Surveys: link to /course/<id>/poll/<id>, "問卷" or "須填寫"
 
-    Returns list of dicts with keys: id, type, title, url, required_minutes.
+    Returns (materials, sequential) where sequential=True if any material
+    requires click-based navigation (no direct URL).
     """
     await page.goto(f"{get_base_url()}/course/{course_id}", wait_until="load")
 
@@ -102,12 +105,24 @@ async def parse_course_materials(page: Page, course_id: str) -> list[dict]:
                 const completed = cols.length >= 4 &&
                     cols[3].querySelector('.item-pass') !== null;
 
+                // Extract icon class for fallback classification
+                const iconEl = node.querySelector('.fs-iconfont');
+                const iconClass = iconEl ? iconEl.className : '';
+
+                // Extract itemID from #mobile_ext-{id} anchor
+                const mobileBtn = node.querySelector('a[href^="#mobile_ext-"]');
+                const itemId = mobileBtn
+                    ? mobileBtn.getAttribute('href').replace('#mobile_ext-', '')
+                    : null;
+
                 results.push({
                     index: i,
                     links: links,
                     fullText: fullText.substring(0, 500),
                     colTexts: colTexts,
                     completed: completed,
+                    iconClass: iconClass,
+                    itemId: itemId,
                 });
             });
             return results;
@@ -115,23 +130,30 @@ async def parse_course_materials(page: Page, course_id: str) -> list[dict]:
     """)
 
     materials = []
+    sequential = False
     for node in nodes:
         mat = _classify_node(node, course_id)
+        if not mat:
+            mat = _classify_node_fallback(node, course_id)
+            if mat:
+                sequential = True
         if mat:
             materials.append(mat)
 
-    logger.info("Course %s: found %d materials", course_id, len(materials))
+    mode = "sequential" if sequential else "normal"
+    logger.info("Course %s: found %d materials (%s)", course_id, len(materials), mode)
     for m in materials:
         web = "PASS" if m.get("completed") else f"rec={m.get('recorded_minutes', 0)}m"
+        url_str = m.get("url") or f"click@{m.get('click_index')}"
         logger.debug(
             "  %s: %s (%s) req=%s [%s]",
             m["type"].value,
             m["title"],
-            m["url"],
+            url_str,
             m.get("required_minutes"),
             web,
         )
-    return materials
+    return materials, sequential
 
 
 def _classify_node(node: dict, course_id: str) -> dict | None:
@@ -243,6 +265,91 @@ def _classify_node(node: dict, course_id: str) -> dict | None:
     return None
 
 
+# Icon class → MaterialType mapping for JS-click mode courses
+_ICON_TYPE_MAP = {
+    "fa-video": MaterialType.VIDEO,
+    "fa-film": MaterialType.VIDEO,
+    "fa-check-square": MaterialType.EXAM,
+    "fa-graduation-cap": MaterialType.SURVEY,
+    "fa-file": MaterialType.DOCUMENT,
+    "fa-file-alt": MaterialType.DOCUMENT,
+}
+
+
+def _infer_type_from_icon(icon_class: str) -> MaterialType | None:
+    """Infer material type from FS icon class string."""
+    for icon_key, mat_type in _ICON_TYPE_MAP.items():
+        if icon_key in icon_class:
+            return mat_type
+    return None
+
+
+def _infer_type_from_text(col_texts: list[str], full_text: str) -> MaterialType | None:
+    """Fallback: infer material type from ext-col pass condition text."""
+    text = " ".join(col_texts) + " " + full_text
+    if "閱讀達" in text and "分鐘" in text:
+        return MaterialType.VIDEO
+    if "及格" in text or "測驗" in text:
+        return MaterialType.EXAM
+    if "須填寫" in text or "問卷" in text:
+        return MaterialType.SURVEY
+    if "閱讀" in text and "次" in text:
+        return MaterialType.DOCUMENT
+    return None
+
+
+def _classify_node_fallback(node: dict, course_id: str) -> dict | None:
+    """Classify an xtree-node that has no direct URL (href='#' JS-click mode).
+
+    Uses icon class and itemID from #mobile_ext-{id} anchor.
+    Returns material dict with click_index and url=None.
+    """
+    item_id = node.get("itemId")
+    if not item_id:
+        return None
+
+    icon_class = node.get("iconClass", "")
+    col_texts = node.get("colTexts", [])
+    full_text = node.get("fullText", "")
+    index = node.get("index", 0)
+    completed = node.get("completed", False)
+
+    # Infer type from icon, fall back to text
+    mat_type = _infer_type_from_icon(icon_class)
+    if not mat_type:
+        mat_type = _infer_type_from_text(col_texts, full_text)
+    if not mat_type:
+        logger.warning("Course %s: cannot infer type for item %s (icon=%s)",
+                       course_id, item_id, icon_class)
+        return None
+
+    # Parse recorded time from col[2]
+    recorded_minutes = 0
+    if len(col_texts) >= 3:
+        recorded_minutes = _parse_time_to_minutes(col_texts[2])
+
+    # Extract required minutes for videos
+    required_minutes = _extract_required_minutes(full_text) if mat_type == MaterialType.VIDEO else None
+
+    # Extract title from node text (e.g. "1. 結核病照護與防治")
+    title = ""
+    title_match = re.search(r"\d+\.\s+(.+?)(?:\n|$)", full_text)
+    if title_match:
+        title = title_match.group(1).strip()
+
+    prefix = mat_type.value  # video, exam, survey, document
+    return {
+        "id": f"{prefix}_{item_id}",
+        "type": mat_type,
+        "title": title,
+        "url": None,
+        "click_index": index,
+        "required_minutes": required_minutes,
+        "completed": completed,
+        "recorded_minutes": recorded_minutes,
+    }
+
+
 def _extract_id_from_url(url: str) -> str:
     """Extract the last numeric segment from a URL."""
     parts = url.rstrip("/").split("/")
@@ -300,6 +407,7 @@ async def _check_material_web_pass(
             """(numericId) => {
                 const nodes = document.querySelectorAll('li.xtree-node');
                 for (const node of nodes) {
+                    // Match by URL (direct mode)
                     const links = node.querySelectorAll('a');
                     for (const link of links) {
                         if (link.href && link.href.includes('/' + numericId)) {
@@ -307,6 +415,14 @@ async def _check_material_web_pass(
                             if (cols.length >= 4) {
                                 return cols[3].querySelector('.item-pass') !== null;
                             }
+                        }
+                    }
+                    // Match by itemID in #mobile_ext-{id} (click mode)
+                    const mobileBtn = node.querySelector('a[href="#mobile_ext-' + numericId + '"]');
+                    if (mobileBtn) {
+                        const cols = node.querySelectorAll('.ext-col');
+                        if (cols.length >= 4) {
+                            return cols[3].querySelector('.item-pass') !== null;
                         }
                     }
                 }
@@ -343,14 +459,24 @@ async def _check_all_materials_web(
                     const passed = cols.length >= 4 &&
                         cols[3].querySelector('.item-pass') !== null;
 
-                    // Extract numeric ID from links
+                    // Extract numeric ID from links (direct URL mode)
                     const links = node.querySelectorAll('a');
+                    let matched = false;
                     for (const link of links) {
                         const href = link.href || '';
                         const match = href.match(/\\/(media|poll|exam|quiz)\\/(\\d+)/);
                         if (match) {
                             statuses[match[2]] = passed;
+                            matched = true;
                             break;
+                        }
+                    }
+                    // Fallback: extract itemID from #mobile_ext-{id} anchor
+                    if (!matched) {
+                        const mobileBtn = node.querySelector('a[href^="#mobile_ext-"]');
+                        if (mobileBtn) {
+                            const itemId = mobileBtn.getAttribute('href').replace('#mobile_ext-', '');
+                            statuses[itemId] = passed;
                         }
                     }
                 });
@@ -415,7 +541,19 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
 
             save_course_progress(course_id, course_prog)
 
-            raw_materials = await parse_course_materials(page, course_id)
+            raw_materials, sequential = await parse_course_materials(page, course_id)
+
+            # Guard: xtree-nodes exist but nothing was classified
+            node_count = await page.evaluate(
+                "() => document.querySelectorAll('li.xtree-node').length"
+            )
+            if not raw_materials and node_count > 0:
+                logger.error(
+                    "Course %s: %d xtree-nodes found but 0 materials classified",
+                    course_id, node_count,
+                )
+                return False
+
             if not course_prog.materials:
                 from ..state.models import MaterialProgress
 
@@ -426,8 +564,9 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
                         status=Status.DONE if m.get("completed") else Status.PENDING,
                         required_minutes=m.get("required_minutes"),
                         recorded_minutes=m.get("recorded_minutes", 0),
-                        url=m["url"],
+                        url=m.get("url") or "",
                         title=m.get("title", ""),
+                        click_index=m.get("click_index"),
                     )
                     for m in raw_materials
                 ]
@@ -452,62 +591,99 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
             await page.close()
             page = None  # Release the page and semaphore slot
 
-        # Step 3: Process non-exam materials
-        for mat in course_prog.materials:
-            if mat.status == Status.DONE:
-                continue
-            if mat.material_type == MaterialType.EXAM:
-                continue  # exams last
-
-            mat.status = Status.IN_PROGRESS
-            save_course_progress(course_id, course_prog)
-
-            success = await _handle_material(context, mat, course_id)
-            if success:
-                # Verify via web
-                async with _page_semaphore:
-                    web_pass = await _check_material_web_pass(
-                        context, course_id, mat.material_id
-                    )
-                if web_pass:
-                    mat.status = Status.DONE
-                else:
-                    logger.warning(
-                        "  %s: handler succeeded but web not passed yet",
+        if sequential:
+            # Sequential mode: process in page order (checkPassPrevious enforced)
+            ordered = sorted(course_prog.materials, key=lambda m: m.click_index or 0)
+            prev_failed = False
+            for mat in ordered:
+                if mat.status == Status.DONE:
+                    continue
+                if prev_failed and mat.click_index is not None:
+                    logger.info(
+                        "  %s: skipping (previous material failed, checkPassPrevious will block)",
                         mat.material_id,
                     )
-                    mat.status = Status.PENDING
-            else:
-                mat.status = Status.PENDING
-            save_course_progress(course_id, course_prog)
+                    continue
 
-        # Step 4: Process exams
-        for mat in course_prog.materials:
-            if mat.status == Status.DONE:
-                continue
-            if mat.material_type != MaterialType.EXAM:
-                continue
+                mat.status = Status.IN_PROGRESS
+                save_course_progress(course_id, course_prog)
 
-            mat.status = Status.IN_PROGRESS
-            save_course_progress(course_id, course_prog)
-
-            success = await _handle_material(context, mat, course_id)
-            if success:
-                async with _page_semaphore:
-                    web_pass = await _check_material_web_pass(
-                        context, course_id, mat.material_id
-                    )
-                if web_pass:
-                    mat.status = Status.DONE
+                success = await _handle_material(context, mat, course_id)
+                if success:
+                    async with _page_semaphore:
+                        web_pass = await _check_material_web_pass(
+                            context, course_id, mat.material_id
+                        )
+                    if web_pass:
+                        mat.status = Status.DONE
+                    else:
+                        logger.warning(
+                            "  %s: handler succeeded but web not passed yet",
+                            mat.material_id,
+                        )
+                        mat.status = Status.PENDING
+                        prev_failed = True
                 else:
-                    logger.warning(
-                        "  %s: handler succeeded but web not passed yet",
-                        mat.material_id,
-                    )
                     mat.status = Status.PENDING
-            else:
-                mat.status = Status.PENDING
-            save_course_progress(course_id, course_prog)
+                    prev_failed = True
+                save_course_progress(course_id, course_prog)
+        else:
+            # Normal mode: non-exam first, exam last
+            # Step 3: Process non-exam materials
+            for mat in course_prog.materials:
+                if mat.status == Status.DONE:
+                    continue
+                if mat.material_type == MaterialType.EXAM:
+                    continue  # exams last
+
+                mat.status = Status.IN_PROGRESS
+                save_course_progress(course_id, course_prog)
+
+                success = await _handle_material(context, mat, course_id)
+                if success:
+                    async with _page_semaphore:
+                        web_pass = await _check_material_web_pass(
+                            context, course_id, mat.material_id
+                        )
+                    if web_pass:
+                        mat.status = Status.DONE
+                    else:
+                        logger.warning(
+                            "  %s: handler succeeded but web not passed yet",
+                            mat.material_id,
+                        )
+                        mat.status = Status.PENDING
+                else:
+                    mat.status = Status.PENDING
+                save_course_progress(course_id, course_prog)
+
+            # Step 4: Process exams
+            for mat in course_prog.materials:
+                if mat.status == Status.DONE:
+                    continue
+                if mat.material_type != MaterialType.EXAM:
+                    continue
+
+                mat.status = Status.IN_PROGRESS
+                save_course_progress(course_id, course_prog)
+
+                success = await _handle_material(context, mat, course_id)
+                if success:
+                    async with _page_semaphore:
+                        web_pass = await _check_material_web_pass(
+                            context, course_id, mat.material_id
+                        )
+                    if web_pass:
+                        mat.status = Status.DONE
+                    else:
+                        logger.warning(
+                            "  %s: handler succeeded but web not passed yet",
+                            mat.material_id,
+                        )
+                        mat.status = Status.PENDING
+                else:
+                    mat.status = Status.PENDING
+                save_course_progress(course_id, course_prog)
 
         # Step 5: Final web verification — check all materials at once
         async with _page_semaphore:
@@ -539,6 +715,51 @@ async def process_course(context: BrowserContext, course_id: str) -> bool:
             await page.close()
 
 
+async def _click_navigate_material(
+    page: Page, course_id: str, click_index: int
+) -> str | None:
+    """Navigate to course page and click the xtree-node at click_index.
+
+    Waits for the page URL to change (JS navigation via checkPassPrevious).
+    Returns the destination URL, or None if navigation didn't happen.
+    """
+    await page.goto(
+        f"{get_base_url()}/course/{course_id}", wait_until="networkidle"
+    )
+    url_before = page.url
+
+    # Click the button via JS (class names are dynamic, so use index)
+    navigated = await page.evaluate(
+        """(idx) => {
+            const nodes = document.querySelectorAll('li.xtree-node');
+            if (idx >= nodes.length) return false;
+            const btn = nodes[idx].querySelector('a[href="#"]:not([href^="#mobile_ext"])');
+            if (btn) { btn.click(); return true; }
+            return false;
+        }""",
+        click_index,
+    )
+    if not navigated:
+        logger.warning("Course %s: click_index %d — no button found", course_id, click_index)
+        return None
+
+    # Wait for URL to change (JS navigates after checkPassPrevious)
+    try:
+        await page.wait_for_url(
+            lambda url: url != url_before, timeout=15000
+        )
+    except Exception:
+        logger.warning(
+            "Course %s: click_index %d — navigation timeout (checkPassPrevious blocked?)",
+            course_id, click_index,
+        )
+        return None
+
+    dest_url = page.url
+    logger.info("Course %s: click_index %d → %s", course_id, click_index, dest_url[:80])
+    return dest_url
+
+
 async def _handle_material(
     context: BrowserContext, mat, course_id: str | None = None
 ) -> bool:
@@ -548,31 +769,49 @@ async def _handle_material(
     Other types only acquire _page_semaphore.
     """
     is_video = mat.material_type == MaterialType.VIDEO
+    needs_click = mat.click_index is not None and not mat.url
 
     for attempt in range(1, MAX_MATERIAL_RETRIES + 1):
+        url = mat.url
         logger.info(
             "Processing %s: %s (%s) [attempt %d/%d]",
             mat.material_type.value,
             mat.title or mat.material_id,
-            mat.url,
+            url or f"click@{mat.click_index}",
             attempt,
             MAX_MATERIAL_RETRIES,
         )
         try:
+            # Discover URL via click navigation if needed
+            if needs_click:
+                async with _page_semaphore:
+                    page = await context.new_page()
+                    try:
+                        url = await _click_navigate_material(
+                            page, course_id, mat.click_index
+                        )
+                    finally:
+                        await page.close()
+                if not url:
+                    return False  # checkPassPrevious blocked or timeout
+                # Cache the discovered URL for future retries
+                mat.url = url
+                needs_click = False
+
             if is_video:
                 async with _video_semaphore:
                     async with _page_semaphore:
                         result = await handle_video(
-                            context, mat.url, mat.required_minutes, mat.recorded_minutes
+                            context, url, mat.required_minutes, mat.recorded_minutes
                         )
             else:
                 async with _page_semaphore:
                     if mat.material_type == MaterialType.DOCUMENT:
-                        result = await handle_document(context, mat.url)
+                        result = await handle_document(context, url)
                     elif mat.material_type == MaterialType.SURVEY:
-                        result = await handle_survey(context, mat.url)
+                        result = await handle_survey(context, url)
                     elif mat.material_type == MaterialType.EXAM:
-                        result = await handle_exam(context, mat.url, course_id)
+                        result = await handle_exam(context, url, course_id)
                     else:
                         result = False
 

@@ -34,8 +34,9 @@ class MaterialProgress(BaseModel):
     status: Status = Status.PENDING
     required_minutes: int | None = None
     recorded_minutes: int = 0
-    url: str
+    url: str = ""
     title: str = ""
+    click_index: int | None = None
 
 
 class CourseProgress(BaseModel):
