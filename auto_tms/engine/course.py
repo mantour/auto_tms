@@ -733,7 +733,7 @@ async def _click_navigate_material(
         """(idx) => {
             const nodes = document.querySelectorAll('li.xtree-node');
             if (idx >= nodes.length) return false;
-            const btn = nodes[idx].querySelector('a[href="#"]:not([href^="#mobile_ext"])');
+            const btn = nodes[idx].querySelector('a[class*="__button"]');
             if (btn) { btn.click(); return true; }
             return false;
         }""",
