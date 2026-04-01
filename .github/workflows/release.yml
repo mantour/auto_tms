@@ -67,4 +67,24 @@ jobs:
           files: |
             artifacts/auto_tms_win/auto_tms_win.zip
             artifacts/auto_tms_mac/auto_tms_mac.zip
-          generate_release_notes: true
+          body: |
+            ## 桌面版（推薦）
+
+            下載對應平台的壓縮檔，解壓後執行 `auto_tms` 即可。
+
+            | 平台 | 下載 | 說明 |
+            |------|------|------|
+            | Windows | `auto_tms_win.zip` | 解壓 → 執行 `auto_tms.exe` |
+            | macOS | `auto_tms_mac.zip` | 解壓 → 右鍵打開 `auto_tms` |
+
+            啟動後在「設定」頁輸入帳號密碼，切到「執行」頁按「開始」。
+
+            ## CLI（開發者）
+
+            ```bash
+            git clone https://github.com/mantour/auto_tms.git && cd auto_tms
+            make setup        # 安裝套件、下載瀏覽器
+            make config       # 設定帳號密碼
+            make run          # 開始自動完成課程
+            make status       # 查看進度
+            ```
