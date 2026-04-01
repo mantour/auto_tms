@@ -5,16 +5,33 @@
 
 ## 快速開始
 
-### 方式一：桌面版（推薦）
+### 方式一：桌面版 GUI（推薦）
 
-到 [Releases](https://github.com/mantour/auto_tms/releases) 下載對應平台的執行檔：
+到 [Releases](https://github.com/mantour/auto_tms/releases) 下載對應平台的壓縮檔，解壓後雙擊執行：
 
-- **Windows**：下載 `auto_tms_win.exe`，雙擊執行
-- **macOS**：下載 `auto_tms_mac`，右鍵 → 打開 → 確認
+| 平台 | 下載 | 說明 |
+|------|------|------|
+| Windows | `auto_tms_win.zip` | 解壓 → 執行 `auto_tms.exe` |
+| macOS | `auto_tms_mac.zip` | 解壓 → 右鍵打開 `auto_tms` |
 
-啟動後在設定頁輸入帳號密碼，切到執行頁按「開始」即可。
+啟動後在「設定」頁輸入帳號密碼，切到「執行」頁按「開始」即可。
 
-### 方式二：CLI（開發者）
+### 方式二：桌面版 CLI
+
+同樣的執行檔也支援命令列模式，適合排程或進階操作：
+
+```bash
+auto_tms.exe run                      # 全自動（待修 + 學程）
+auto_tms.exe run --mode pending       # 僅完成待修課程
+auto_tms.exe run 191428               # 完成單一課程
+auto_tms.exe status                   # 查看進度
+auto_tms.exe status --refresh         # 從網頁重新抓取
+auto_tms.exe log                      # 查看 log
+```
+
+不帶參數執行則啟動 GUI。
+
+### 方式三：從原始碼安裝（開發者）
 
 前置需求：
 - **Linux / macOS**：安裝 [uv](https://github.com/astral-sh/uv)（會自動安裝 Python）：

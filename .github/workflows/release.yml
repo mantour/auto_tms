@@ -68,9 +68,9 @@ jobs:
             artifacts/auto_tms_win/auto_tms_win.zip
             artifacts/auto_tms_mac/auto_tms_mac.zip
           body: |
-            ## 桌面版（推薦）
+            ## 方式一：桌面版 GUI（推薦）
 
-            下載對應平台的壓縮檔，解壓後執行 `auto_tms` 即可。
+            下載對應平台的壓縮檔，解壓後雙擊執行。
 
             | 平台 | 下載 | 說明 |
             |------|------|------|
@@ -79,7 +79,22 @@ jobs:
 
             啟動後在「設定」頁輸入帳號密碼，切到「執行」頁按「開始」。
 
-            ## CLI（開發者）
+            ## 方式二：桌面版 CLI
+
+            同樣的執行檔也支援命令列模式：
+
+            ```bash
+            auto_tms.exe run                      # 全自動
+            auto_tms.exe run --mode pending       # 僅待修課程
+            auto_tms.exe run 191428               # 單一課程
+            auto_tms.exe status                   # 查看進度
+            auto_tms.exe status --refresh         # 從網頁重新抓取
+            auto_tms.exe log                      # 查看 log
+            ```
+
+            不帶參數執行則啟動 GUI。
+
+            ## 方式三：從原始碼安裝（開發者）
 
             ```bash
             git clone https://github.com/mantour/auto_tms.git && cd auto_tms

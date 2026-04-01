@@ -1,4 +1,4 @@
-"""Desktop GUI entry point: FastAPI server + pywebview window."""
+"""Desktop app entry point: GUI (no args) or CLI (with args)."""
 
 import asyncio
 import socket
@@ -26,17 +26,15 @@ def _run_server(port: int) -> None:
     loop.run_until_complete(server.serve())
 
 
-def main() -> None:
-    """Launch the desktop app."""
+def _launch_gui() -> None:
+    """Launch the desktop GUI window."""
     import webview
 
     port = _find_free_port()
 
-    # Start FastAPI server in background thread
     server_thread = threading.Thread(target=_run_server, args=(port,), daemon=True)
     server_thread.start()
 
-    # Open native window
     webview.create_window(
         "auto_tms",
         f"http://127.0.0.1:{port}",
@@ -45,6 +43,15 @@ def main() -> None:
         min_size=(700, 500),
     )
     webview.start()
+
+
+def main() -> None:
+    """Entry point: no args → GUI, with args → CLI."""
+    if len(sys.argv) > 1:
+        from auto_tms.cli import cli
+        cli()
+    else:
+        _launch_gui()
 
 
 if __name__ == "__main__":
