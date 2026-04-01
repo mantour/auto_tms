@@ -13,11 +13,11 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: auto_tms_win.exe
-            pyinstaller_ext: .exe
+            artifact_name: auto_tms_win
+            zip_name: auto_tms_win.zip
           - os: macos-latest
-            artifact: auto_tms_mac
-            pyinstaller_ext: ""
+            artifact_name: auto_tms_mac
+            zip_name: auto_tms_mac.zip
 
     runs-on: ${{ matrix.os }}
 
@@ -40,17 +40,18 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller build/auto_tms.spec --distpath dist
 
-      - name: Rename artifact
+      - name: Zip output folder
         shell: bash
         run: |
-          if [ -f "dist/auto_tms${{ matrix.pyinstaller_ext }}" ]; then
-            cp "dist/auto_tms${{ matrix.pyinstaller_ext }}" "dist/${{ matrix.artifact }}"
+          cd dist
+          if [ -d "auto_tms" ]; then
+            7z a -r "${{ matrix.zip_name }}" auto_tms/ || zip -r "${{ matrix.zip_name }}" auto_tms/
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.zip_name }}
 
   release:
     needs: build
@@ -64,6 +65,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/auto_tms_win.exe/auto_tms_win.exe
-            artifacts/auto_tms_mac/auto_tms_mac
+            artifacts/auto_tms_win/auto_tms_win.zip
+            artifacts/auto_tms_mac/auto_tms_mac.zip
           generate_release_notes: true

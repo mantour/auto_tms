@@ -7,23 +7,16 @@ from pathlib import Path
 
 block_cipher = None
 
-# Find Playwright's Chromium browser path
-def get_playwright_browser_path():
-    """Locate the Playwright Chromium installation."""
-    import playwright
-    pw_dir = Path(playwright.__file__).parent
-    driver_dir = pw_dir / "driver"
-    if driver_dir.exists():
-        return str(driver_dir)
-    # Fallback: check PLAYWRIGHT_BROWSERS_PATH
-    browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-    if browsers_path and Path(browsers_path).exists():
-        return browsers_path
-    # Default location
-    home = Path.home()
-    default = home / ".cache" / "ms-playwright"
-    if default.exists():
-        return str(default)
+def find_playwright_browsers():
+    """Find ms-playwright browser installations to bundle."""
+    candidates = [
+        os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""),
+        str(Path.home() / ".cache" / "ms-playwright"),                  # Linux/Mac
+        str(Path.home() / "AppData" / "Local" / "ms-playwright"),       # Windows
+    ]
+    for p in candidates:
+        if p and Path(p).exists() and any(Path(p).iterdir()):
+            return p
     return None
 
 project_root = os.path.abspath(os.path.join(SPECPATH, '..'))
@@ -33,22 +26,19 @@ datas = [
     (os.path.join(project_root, 'gui', 'frontend'), os.path.join('gui', 'frontend')),
 ]
 
-# Add Playwright driver
-pw_path = get_playwright_browser_path()
-if pw_path:
-    datas.append((pw_path, os.path.join('playwright', 'driver')))
+# Add Playwright driver (node package)
+import playwright
+pw_driver = Path(playwright.__file__).parent / "driver"
+if pw_driver.exists():
+    datas.append((str(pw_driver), os.path.join('playwright', 'driver')))
 
-# Add Playwright browsers (Chromium)
-import subprocess
-result = subprocess.run(
-    [sys.executable, '-c', 'import playwright; print(playwright.__file__)'],
-    capture_output=True, text=True,
-)
-if result.returncode == 0:
-    pw_init = Path(result.stdout.strip())
-    browsers_json = pw_init.parent / "driver" / "package" / "browsers.json"
-    if browsers_json.exists():
-        datas.append((str(browsers_json.parent), os.path.join('playwright', 'driver', 'package')))
+# Add Playwright browsers (Chromium binaries from ms-playwright)
+browsers_dir = find_playwright_browsers()
+if browsers_dir:
+    datas.append((browsers_dir, 'ms-playwright'))
+    print(f"[auto_tms.spec] Bundling browsers from: {browsers_dir}")
+else:
+    print("[auto_tms.spec] WARNING: No Playwright browsers found! Run 'playwright install chromium' first.")
 
 a = Analysis(
     [os.path.join(project_root, 'gui', 'app.py')],
@@ -103,7 +93,7 @@ a = Analysis(
     ],
     hookspath=[os.path.join(project_root, 'build')],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[os.path.join(project_root, 'build', 'runtime_hook.py')],
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -116,21 +106,29 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='auto_tms',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='auto_tms',
 )
