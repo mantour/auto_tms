@@ -3,7 +3,7 @@ __pycache__/
 *.egg-info/
 .venv/
 dist/
-build/
+build/output/
 .eggs/
 .env
 CLAUDE.md

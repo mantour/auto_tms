@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>auto_tms</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="settings">設定</button>
+  <button class="tab" data-tab="progress">學程進度</button>
+  <button class="tab" data-tab="run">執行</button>
+  <button class="tab" data-tab="log">Log</button>
+</nav>
+
+<!-- Settings Tab -->
+<div id="settings" class="panel active">
+  <h2>設定</h2>
+  <form id="config-form">
+    <div class="form-group">
+      <label>TMS 主機</label>
+      <input type="text" name="host" placeholder="edu.example.com">
+    </div>
+    <div class="form-group">
+      <label>帳號</label>
+      <input type="text" name="user">
+    </div>
+    <div class="form-group">
+      <label>密碼</label>
+      <input type="password" name="password">
+    </div>
+    <div class="form-group">
+      <label>Proxy</label>
+      <input type="text" name="proxy" placeholder="socks5://127.0.0.1:1080">
+    </div>
+    <hr>
+    <div class="form-group">
+      <label>LLM Provider</label>
+      <select name="llm_provider">
+        <option value="none">不使用</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="openai">OpenAI</option>
+        <option value="gemini">Gemini</option>
+        <option value="local">Local</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>API Key</label>
+      <input type="password" name="llm_api_key">
+    </div>
+    <div class="form-group">
+      <label>LLM Base URL</label>
+      <input type="text" name="llm_base_url" placeholder="(optional)">
+    </div>
+    <hr>
+    <div class="form-row">
+      <div class="form-group">
+        <label>並行頁面</label>
+        <input type="number" name="max_pages" min="1" max="10" value="5">
+      </div>
+      <div class="form-group">
+        <label>並行影片</label>
+        <input type="number" name="max_videos" min="1" max="5" value="2">
+      </div>
+    </div>
+    <button type="submit" class="btn primary">儲存</button>
+    <span id="config-msg" class="msg"></span>
+  </form>
+</div>
+
+<!-- Progress Tab -->
+<div id="progress" class="panel">
+  <h2>學程進度 <button class="btn small" id="refresh-btn">重新整理</button></h2>
+  <div id="programs-list"></div>
+  <h3>課程列表</h3>
+  <div id="courses-list"></div>
+</div>
+
+<!-- Run Tab -->
+<div id="run" class="panel">
+  <h2>執行</h2>
+  <div class="form-row">
+    <div class="form-group">
+      <label>模式</label>
+      <select id="run-mode">
+        <option value="all">全部 (待修+學程)</option>
+        <option value="pending">僅待修課程</option>
+        <option value="program">僅學程規劃</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>課程 ID (選填)</label>
+      <input type="text" id="run-course-id" placeholder="單一課程">
+    </div>
+  </div>
+  <div class="btn-group">
+    <button class="btn primary" id="btn-start">開始</button>
+    <button class="btn danger" id="btn-stop" disabled>停止</button>
+    <button class="btn" id="btn-reset">重置</button>
+  </div>
+  <div id="run-status" class="status-box">
+    <div class="status-line"><span class="label">狀態:</span> <span id="rs-state">待命</span></div>
+    <div class="status-line"><span class="label">迭代:</span> <span id="rs-iteration">-</span></div>
+    <div class="status-line"><span class="label">課程:</span> <span id="rs-courses">-</span></div>
+    <div class="status-line"><span class="label">錯誤:</span> <span id="rs-errors">0</span></div>
+  </div>
+</div>
+
+<!-- Log Tab -->
+<div id="log" class="panel">
+  <h2>Log</h2>
+  <div id="log-output" class="log-box"></div>
+</div>
+
+<!-- Status Bar -->
+<footer id="statusbar">
+  <span id="sb-state">待命</span>
+  <span id="sb-info"></span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -5,15 +5,23 @@
 
 ## 快速開始
 
-### 前置需求
+### 方式一：桌面版（推薦）
 
+到 [Releases](https://github.com/mantour/auto_tms/releases) 下載對應平台的執行檔：
+
+- **Windows**：下載 `auto_tms_win.exe`，雙擊執行
+- **macOS**：下載 `auto_tms_mac`，右鍵 → 打開 → 確認
+
+啟動後在設定頁輸入帳號密碼，切到執行頁按「開始」即可。
+
+### 方式二：CLI（開發者）
+
+前置需求：
 - **Linux / macOS**：安裝 [uv](https://github.com/astral-sh/uv)（會自動安裝 Python）：
   ```bash
   curl -LsSf https://astral.sh/uv/install.sh | sh
   ```
 - **Windows**：建議使用 [WSL](https://learn.microsoft.com/zh-tw/windows/wsl/install)（`wsl --install`），然後在 WSL 內安裝 uv。
-
-### 安裝與執行
 
 ```bash
 git clone https://github.com/mantour/auto_tms.git && cd auto_tms
