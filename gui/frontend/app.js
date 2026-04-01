@@ -75,6 +75,12 @@ configForm.addEventListener('submit', async (e) => {
 // ---------------------------------------------------------------------------
 
 async function loadStatus(refresh = false) {
+  const spinner = document.getElementById('loading-spinner');
+  const refreshBtn = document.getElementById('refresh-btn');
+  if (refresh) {
+    spinner.classList.remove('hidden');
+    refreshBtn.disabled = true;
+  }
   try {
     const url = refresh ? '/api/status?refresh=true' : '/api/status';
     const res = await fetch(url);
@@ -85,6 +91,9 @@ async function loadStatus(refresh = false) {
     updateStatusBar(data);
   } catch (e) {
     console.error('Failed to load status:', e);
+  } finally {
+    spinner.classList.add('hidden');
+    refreshBtn.disabled = false;
   }
 }
 

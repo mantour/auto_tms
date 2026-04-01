@@ -10,8 +10,8 @@
 
 <nav class="tabs">
   <button class="tab active" data-tab="settings">設定</button>
-  <button class="tab" data-tab="progress">學程進度</button>
   <button class="tab" data-tab="run">執行</button>
+  <button class="tab" data-tab="progress">學程進度</button>
   <button class="tab" data-tab="log">Log</button>
 </nav>
 
@@ -72,7 +72,7 @@
 
 <!-- Progress Tab -->
 <div id="progress" class="panel">
-  <h2>學程進度 <button class="btn small" id="refresh-btn">重新整理</button></h2>
+  <h2>學程進度 <button class="btn small" id="refresh-btn">重新整理</button> <span id="loading-spinner" class="spinner hidden"></span></h2>
   <div id="programs-list"></div>
   <h3>課程列表</h3>
   <div id="courses-list"></div>
