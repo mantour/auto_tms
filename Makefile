@@ -13,7 +13,7 @@ setup: ## Install dependencies and playwright
 	$(BIN)/playwright install --with-deps chromium
 
 config: ## Configure credentials, host, proxy, and LLM
-	@bash scripts/config.sh
+	@$(AUTO_TMS) config
 
 run: ## Full pipeline (ID=N for single, MODE=pending/program/all)
 ifdef ID

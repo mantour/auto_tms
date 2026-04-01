@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -86,7 +87,82 @@ def log() -> None:
         click.echo("No log files found.")
         return
     click.echo(f"Tailing {log_file.name}")
-    subprocess.run(["tail", "-f", str(log_file)])
+    if sys.platform == "win32":
+        subprocess.run(["powershell", "-Command", f"Get-Content '{log_file}' -Wait"])
+    else:
+        subprocess.run(["tail", "-f", str(log_file)])
+
+
+@cli.command()
+def config() -> None:
+    """Interactive .env configuration."""
+    from .config import LOCAL_ENV_FILE
+
+    def _read_env() -> dict[str, str]:
+        env: dict[str, str] = {}
+        if LOCAL_ENV_FILE.exists():
+            for line in LOCAL_ENV_FILE.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    env[key.strip()] = val.strip().strip('"').strip("'")
+        return env
+
+    def _ask(prompt: str, current: str = "", secret: bool = False) -> str:
+        hint = "****" if secret and current else current
+        suffix = f" [{hint}]" if hint else ""
+        if secret:
+            val = click.prompt(f"{prompt}{suffix}", default="", show_default=False, hide_input=True)
+        else:
+            val = click.prompt(f"{prompt}{suffix}", default=current, show_default=False)
+        return val if val else current
+
+    env = _read_env()
+    click.echo("設定 .env（不會被 commit）\n")
+
+    # Basic
+    env["TMS_USER"] = _ask("TMS_USER (員工編號)", env.get("TMS_USER", ""))
+    env["TMS_PASSWD"] = _ask("TMS_PASSWD", env.get("TMS_PASSWD", ""), secret=True)
+    env["TMS_HOST"] = _ask("TMS_HOST", env.get("TMS_HOST", ""))
+    env["TMS_PROXY"] = _ask("TMS_PROXY (e.g. socks5://127.0.0.1:1080)", env.get("TMS_PROXY", ""))
+    env["TMS_MAX_PAGES"] = _ask("TMS_MAX_PAGES (並行頁面)", env.get("TMS_MAX_PAGES", "5"))
+    env["TMS_MAX_VIDEOS"] = _ask("TMS_MAX_VIDEOS (並行影片)", env.get("TMS_MAX_VIDEOS", "2"))
+
+    # LLM
+    click.echo("\nLLM 設定:")
+    click.echo("  1. 不使用 LLM (驗證碼用 ddddocr, 測驗用暴力法)")
+    click.echo("  2. Anthropic Claude")
+    click.echo("  3. OpenAI")
+    click.echo("  4. Google Gemini (有免費額度)")
+    click.echo("  5. 本地模型 (Ollama/vLLM)")
+
+    provider_map = {"1": "none", "2": "anthropic", "3": "openai", "4": "gemini", "5": "local"}
+    reverse_map = {v: k for k, v in provider_map.items()}
+    cur = reverse_map.get(env.get("TMS_LLM_PROVIDER", "none"), "1")
+    choice = click.prompt(f"選擇 [{cur}]", default=cur, show_default=False)
+    provider = provider_map.get(choice, "none")
+    env["TMS_LLM_PROVIDER"] = provider
+
+    if provider == "anthropic":
+        env["ANTHROPIC_API_KEY"] = _ask("ANTHROPIC_API_KEY", env.get("ANTHROPIC_API_KEY", ""), secret=True)
+    elif provider == "openai":
+        env["TMS_LLM_API_KEY"] = _ask("OpenAI API key", env.get("TMS_LLM_API_KEY", ""), secret=True)
+    elif provider == "gemini":
+        env["TMS_LLM_API_KEY"] = _ask("Gemini API key", env.get("TMS_LLM_API_KEY", ""), secret=True)
+    elif provider == "local":
+        env["TMS_LLM_BASE_URL"] = _ask("API Base URL", env.get("TMS_LLM_BASE_URL", "http://localhost:11434/v1"))
+        env["TMS_LLM_MODEL"] = _ask("Model name", env.get("TMS_LLM_MODEL", "llama3"))
+        env["TMS_LLM_API_KEY"] = _ask("API Key (不需要直接 Enter)", env.get("TMS_LLM_API_KEY", ""), secret=True)
+
+    # Write
+    lines = []
+    for key, val in env.items():
+        if val:
+            lines.append(f'{key}="{val}"')
+    LOCAL_ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    click.echo(f"\n已儲存至 {LOCAL_ENV_FILE}")
 
 
 # ---------------------------------------------------------------------------
