@@ -165,11 +165,20 @@ async def _status_live(show_all: bool = False) -> None:
 
 def _is_pipeline_running() -> bool:
     """Check if the pipeline process is running."""
-    result = subprocess.run(
-        ["pgrep", "-f", "auto_tms.*run"],
-        capture_output=True, text=True,
-    )
-    return result.returncode == 0
+    import sys
+
+    if sys.platform == "win32":
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq auto_tms.exe"],
+            capture_output=True, text=True,
+        )
+        return "auto_tms.exe" in result.stdout
+    else:
+        result = subprocess.run(
+            ["pgrep", "-f", "auto_tms.*run"],
+            capture_output=True, text=True,
+        )
+        return result.returncode == 0
 
 
 def _parse_log_activity() -> dict:
