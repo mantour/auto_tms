@@ -45,9 +45,31 @@ def _launch_gui() -> None:
     webview.start()
 
 
+def _attach_console() -> None:
+    """On Windows, reattach to the parent console for CLI output.
+
+    PyInstaller builds with console=False have no console attached,
+    so stdout/stderr are lost. This restores them when running in CLI mode.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        import os
+
+        ATTACH_PARENT_PROCESS = -1
+        kernel32 = ctypes.windll.kernel32
+        if kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+            sys.stdout = open("CONOUT$", "w", encoding="utf-8")
+            sys.stderr = open("CONOUT$", "w", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def main() -> None:
     """Entry point: no args → GUI, with args → CLI."""
     if len(sys.argv) > 1:
+        _attach_console()
         from auto_tms.cli import cli
         cli()
     else:
