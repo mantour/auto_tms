@@ -8,7 +8,14 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+def _get_project_dir() -> Path:
+    """Return the project directory. For frozen apps, use the exe's directory."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parent.parent
+
+
+PROJECT_DIR = _get_project_dir()
 LOCAL_ENV_FILE = PROJECT_DIR / ".env"
 SYSTEM_ENV_FILE = Path("/etc/auto_tms.env")
 DATA_DIR = Path.home() / ".auto_tms"
