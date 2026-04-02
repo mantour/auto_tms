@@ -60,6 +60,7 @@ def _attach_console() -> None:
         ATTACH_PARENT_PROCESS = -1
         kernel32 = ctypes.windll.kernel32
         if kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+            sys.stdin = open("CONIN$", "r", encoding="utf-8")
             sys.stdout = open("CONOUT$", "w", encoding="utf-8")
             sys.stderr = open("CONOUT$", "w", encoding="utf-8")
     except Exception:
