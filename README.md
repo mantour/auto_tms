@@ -12,7 +12,7 @@
 | 平台 | 下載 | 說明 |
 |------|------|------|
 | Windows | `auto_tms_win.zip` | 解壓 → 執行 `auto_tms.exe` |
-| macOS | `auto_tms_mac.zip` | 解壓 → 右鍵打開 `auto_tms` |
+| macOS | `auto_tms_mac.tar.gz` | 解壓 → 右鍵打開 `auto_tms` |
 
 啟動後在「設定」頁輸入帳號密碼，切到「執行」頁按「開始」即可。
 

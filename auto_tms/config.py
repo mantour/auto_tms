@@ -9,9 +9,19 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 def _get_project_dir() -> Path:
-    """Return the project directory. For frozen apps, use the exe's directory."""
+    """Return the project directory.
+
+    For frozen apps (PyInstaller), use the exe's directory so .env
+    is stored next to the executable (not inside the bundle).
+    On macOS .app bundles, sys.executable is inside Contents/MacOS/,
+    so we go up to the .app's parent directory.
+    """
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
+        exe_dir = Path(sys.executable).parent
+        # macOS .app bundle: .../Foo.app/Contents/MacOS/exe → .../
+        if exe_dir.match("*/Contents/MacOS"):
+            return exe_dir.parent.parent.parent
+        return exe_dir
     return Path(__file__).resolve().parent.parent
 
 

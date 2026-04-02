@@ -14,10 +14,12 @@ jobs:
         include:
           - os: windows-latest
             artifact_name: auto_tms_win
-            zip_name: auto_tms_win.zip
+            archive_name: auto_tms_win.zip
+            archive_cmd: "7z a -r auto_tms_win.zip auto_tms/ || zip -r auto_tms_win.zip auto_tms/"
           - os: macos-latest
             artifact_name: auto_tms_mac
-            zip_name: auto_tms_mac.zip
+            archive_name: auto_tms_mac.tar.gz
+            archive_cmd: "tar -czf auto_tms_mac.tar.gz auto_tms/"
 
     runs-on: ${{ matrix.os }}
 
@@ -40,18 +42,18 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller build/auto_tms.spec --distpath dist
 
-      - name: Zip output folder
+      - name: Archive output folder
         shell: bash
         run: |
           cd dist
           if [ -d "auto_tms" ]; then
-            7z a -r "${{ matrix.zip_name }}" auto_tms/ || zip -r "${{ matrix.zip_name }}" auto_tms/
+            ${{ matrix.archive_cmd }}
           fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.zip_name }}
+          path: dist/${{ matrix.archive_name }}
 
   release:
     needs: build
@@ -66,7 +68,7 @@ jobs:
         with:
           files: |
             artifacts/auto_tms_win/auto_tms_win.zip
-            artifacts/auto_tms_mac/auto_tms_mac.zip
+            artifacts/auto_tms_mac/auto_tms_mac.tar.gz
           body: |
             ## 方式一：桌面版 GUI（推薦）
 
@@ -75,7 +77,7 @@ jobs:
             | 平台 | 下載 | 說明 |
             |------|------|------|
             | Windows | `auto_tms_win.zip` | 解壓 → 執行 `auto_tms.exe` |
-            | macOS | `auto_tms_mac.zip` | 解壓 → 右鍵打開 `auto_tms` |
+            | macOS | `auto_tms_mac.tar.gz` | 解壓 → 右鍵打開 `auto_tms` |
 
             啟動後在「設定」頁輸入帳號密碼，切到「執行」頁按「開始」。
 
